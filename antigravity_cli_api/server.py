@@ -1,8 +1,9 @@
-"""Antigravity OAuth to OpenAI-compatible HTTP gateway.
+"""Official Antigravity CLI to OpenAI-compatible HTTP gateway.
 
-This module intentionally uses only Python's standard library.  It implements
-the OAuth and v1internal request flow used by Antigravity-compatible clients;
-it does not start the Antigravity desktop application or Gemini CLI.
+The default backend invokes the locally installed ``agy`` command.  Google
+login data remains in the official CLI's user-local credential store; this
+gateway never copies it into source code.  The legacy direct HTTP backend is
+kept behind ``ANTIGRAVITY_BACKEND=direct`` for compatibility.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ import os
 import queue
 import re
 import secrets
+import shlex
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -61,6 +65,8 @@ class Config:
     port = _env_int("ANTIGRAVITY_PORT", 8110)
     timeout = _env_int("ANTIGRAVITY_TIMEOUT", 600)
     api_key = os.environ.get("ANTIGRAVITY_API_KEY", "").strip()
+    backend = os.environ.get("ANTIGRAVITY_BACKEND", "cli").strip().lower()
+    cli_command = os.environ.get("ANTIGRAVITY_CLI_COMMAND", "agy").strip() or "agy"
     auth_file = os.path.abspath(
         os.path.expanduser(
             os.environ.get(
@@ -71,7 +77,7 @@ class Config:
     )
     models = _env_list(
         "ANTIGRAVITY_MODELS",
-        "gemini-pro-agent,gemini-3.1-pro-low,gemini-3.5-flash-low,gemini-3.1-flash-lite",
+        "Gemini 3.1 Pro (Low),Gemini 3.5 Flash (Low),Gemini 3.5 Flash (High)",
     )
     client_id = os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_ID", "").strip()
     client_secret = os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "").strip()
@@ -285,6 +291,41 @@ def discover_project(access_token: str) -> str:
     raise GatewayError("Antigravity 初始化超时，未取得 project_id", status=504)
 
 
+def _oauth_client_credentials(record: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """Resolve Google OAuth client id/secret: env first, then auth-file fields.
+
+    Refresh requests without client_id make Google return:
+    invalid_request / Could not determine client ID from request.
+    """
+    record = record or {}
+    client_id = (
+        Config.client_id
+        or str(record.get("client_id") or record.get("oauth_client_id") or "").strip()
+    )
+    client_secret = (
+        Config.client_secret
+        or str(record.get("client_secret") or record.get("oauth_client_secret") or "").strip()
+    )
+    return client_id, client_secret
+
+
+def _require_oauth_client(record: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    client_id, client_secret = _oauth_client_credentials(record)
+    if not client_id or not client_secret:
+        raise GatewayError(
+            "缺少 OAuth Client ID/Secret（token 刷新需要）。"
+            "请设置 ANTIGRAVITY_OAUTH_CLIENT_ID / ANTIGRAVITY_OAUTH_CLIENT_SECRET 后重新 login，"
+            "或确认 .env 已加载后再 start。",
+            status=500,
+        )
+    # Keep process Config in sync so later refresh / login checks work.
+    if not Config.client_id:
+        Config.client_id = client_id
+    if not Config.client_secret:
+        Config.client_secret = client_secret
+    return client_id, client_secret
+
+
 class TokenStore:
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = os.path.abspath(os.path.expanduser(path or Config.auth_file))
@@ -325,6 +366,20 @@ class TokenStore:
     def exists(self) -> bool:
         return os.path.isfile(self.path)
 
+    def hydrate_oauth_config(self) -> None:
+        """Load client credentials from auth file into Config when env is empty."""
+        if not self.exists():
+            return
+        try:
+            record = self.load()
+        except GatewayError:
+            return
+        client_id, client_secret = _oauth_client_credentials(record)
+        if client_id and not Config.client_id:
+            Config.client_id = client_id
+        if client_secret and not Config.client_secret:
+            Config.client_secret = client_secret
+
     def refresh(self, force: bool = False) -> Tuple[str, Dict[str, Any]]:
         with self.lock:
             record = self.load()
@@ -334,11 +389,12 @@ class TokenStore:
             refresh_token = str(record.get("refresh_token") or "").strip()
             if not refresh_token:
                 raise GatewayError("认证已过期且缺少 refresh_token，请重新登录", status=401)
+            client_id, client_secret = _require_oauth_client(record)
             result = _request_form(
                 Config.token_endpoint,
                 {
-                    "client_id": Config.client_id,
-                    "client_secret": Config.client_secret,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
                 },
@@ -354,6 +410,9 @@ class TokenStore:
                     "expires_in": expires_in,
                     "timestamp": int(time.time() * 1000),
                     "expired": _iso_expiry(expires_in),
+                    # Keep OAuth client with tokens so restart without .env still works.
+                    "client_id": client_id,
+                    "client_secret": client_secret,
                 }
             )
             if result.get("refresh_token"):
@@ -502,6 +561,9 @@ def oauth_login(auth_file: str, callback_port: int, open_browser: bool) -> Dict[
         "timestamp": int(time.time() * 1000),
         "expired": _iso_expiry(expires_in),
         "project_id": project_id,
+        # Stored so token refresh works even if start 时未加载 .env 里的 OAuth 凭据。
+        "client_id": Config.client_id,
+        "client_secret": Config.client_secret,
     }
     TokenStore(auth_file).save(record)
     print(f"\nAntigravity 登录成功：{email}")
@@ -1071,6 +1133,194 @@ class AntigravityGateway:
         return response, StreamState(model, name_map)
 
 
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+def _cli_argv() -> List[str]:
+    try:
+        argv = shlex.split(Config.cli_command, posix=os.name != "nt")
+    except ValueError as exc:
+        raise GatewayError(f"ANTIGRAVITY_CLI_COMMAND 格式错误：{exc}", status=500) from exc
+    if not argv:
+        raise GatewayError("ANTIGRAVITY_CLI_COMMAND 不能为空", status=500)
+    return argv
+
+
+def antigravity_cli_available() -> bool:
+    try:
+        executable = _cli_argv()[0]
+    except GatewayError:
+        return False
+    return bool(
+        (os.path.isfile(executable) and os.access(executable, os.X_OK))
+        or shutil.which(executable)
+    )
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+            elif block.get("type") in ("image", "image_url"):
+                source = block.get("image_url") or block.get("source") or ""
+                if isinstance(source, dict):
+                    source = source.get("url") or source.get("data") or ""
+                parts.append(f"[图片附件：{source or '未提供地址'}]")
+        return "\n".join(item for item in parts if item)
+    return "" if content is None else str(content)
+
+
+def openai_to_cli_prompt(payload: Dict[str, Any]) -> str:
+    """Serialize an OpenAI conversation for ``agy --print`` without credentials."""
+    transcript: List[str] = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").lower()
+        label = {
+            "system": "System",
+            "developer": "Developer",
+            "assistant": "Assistant",
+            "tool": "Tool result",
+            "user": "User",
+        }.get(role, role.title())
+        body = _content_text(message.get("content"))
+        calls: List[str] = []
+        for call in message.get("tool_calls") or []:
+            function = (call or {}).get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if name:
+                calls.append(f"{name}({function.get('arguments') or '{}'})")
+        if calls:
+            body = (body + "\n" if body else "") + "[已调用工具] " + "; ".join(calls)
+        if body:
+            transcript.append(f"{label}: {body}")
+
+    tools = payload.get("tools") or []
+    tool_instructions = ""
+    if tools:
+        catalog: List[Dict[str, Any]] = []
+        for item in tools:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function") or {}
+            if function.get("name"):
+                catalog.append(
+                    {
+                        "name": function.get("name"),
+                        "description": function.get("description") or "",
+                        "parameters": function.get("parameters") or {"type": "object"},
+                    }
+                )
+        if catalog:
+            tool_instructions = (
+                "\n\n[HeySure 工具协议]\n"
+                "需要使用工具时，只输出一个或多个以下格式的块，不要用 Markdown 代码围栏：\n"
+                '<mcp-call>{"tool":"工具名","arguments":{"参数名":"值"}}</mcp-call>\n'
+                "等待平台执行并在下一轮返回结果；不要声称已经执行。可用工具：\n"
+                + json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+            )
+    return (
+        "你正在通过 HeySure 的 OpenAI 兼容网关继续一段对话。"
+        "严格遵守 System/Developer 消息，不要复述转录文本，不要输出角色前缀。\n\n"
+        "[对话转录]\n"
+        + ("\n\n".join(transcript) if transcript else "User: （空消息）")
+        + tool_instructions
+        + "\n\n请直接输出下一条 Assistant 回复。"
+    )
+
+
+class AntigravityCLIGateway:
+    """OpenAI adapter for the official ``agy`` CLI.
+
+    The subprocess inherits HOME from the dedicated runtime user, so the
+    official client reads its own local login state.  No account token crosses
+    this Python process.
+    """
+
+    def complete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        model = str(payload.get("model") or "auto").strip()
+        if model.lower() == "auto":
+            model = Config.models[0] if Config.models else "Gemini 3.1 Pro (Low)"
+        prompt = openai_to_cli_prompt(payload)
+        argv = _cli_argv() + [
+            "--model", model,
+            "--print-timeout", f"{max(1, Config.timeout)}s",
+            "-p", prompt,
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=RUNTIME_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=Config.timeout + 15,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise GatewayError("未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli", status=503) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise GatewayError(f"agy 响应超时（{Config.timeout} 秒）", status=504) from exc
+        answer = _ANSI_RE.sub("", completed.stdout or "").strip()
+        detail = _ANSI_RE.sub("", completed.stderr or "").strip()
+        if completed.returncode != 0:
+            hint = (detail or answer or f"agy 退出码 {completed.returncode}")[-4000:]
+            lowered = hint.lower()
+            status = 401 if any(word in lowered for word in ("login", "sign in", "authenticate", "oauth")) else 502
+            raise GatewayError("agy 调用失败；请运行 ./run.sh auth-status 检查本地登录", status=status, body=hint)
+        if not answer:
+            raise GatewayError("agy 未返回内容", status=502, body=detail[-4000:])
+        prompt_tokens = max(1, len(prompt) // 4)
+        completion_tokens = max(1, len(answer) // 4)
+        return {
+            "id": "chatcmpl-" + uuid.uuid4().hex,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            "system_fingerprint": FINGERPRINT,
+        }
+
+
+def _cli_stream_chunks(result: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    choice = result["choices"][0]
+    text = str(choice["message"].get("content") or "")
+    common = {
+        "id": result["id"],
+        "object": "chat.completion.chunk",
+        "created": result["created"],
+        "model": result["model"],
+        "system_fingerprint": FINGERPRINT,
+    }
+    yield {**common, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
+    for offset in range(0, len(text), 64):
+        yield {**common, "choices": [{"index": 0, "delta": {"content": text[offset:offset + 64]}, "finish_reason": None}]}
+    yield {
+        **common,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": result.get("usage"),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "antigravity-python-gateway/1.0"
 
@@ -1100,12 +1350,16 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/health"):
             store = TokenStore()
+            cli_backend = Config.backend == "cli"
             self._send_json(
                 200,
                 {
                     "status": "ok",
                     "service": FINGERPRINT,
-                    "authenticated": store.exists(),
+                    "backend": Config.backend,
+                    "authenticated": None if cli_backend else store.exists(),
+                    "cli_available": antigravity_cli_available() if cli_backend else None,
+                    "auth_managed_by": "agy-local-profile" if cli_backend else "gateway-auth-file",
                     "endpoint": "/v1/chat/completions",
                 },
             )
@@ -1152,7 +1406,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
             self._error(400, "messages must be an array")
             return
-        gateway = AntigravityGateway()
+        gateway = AntigravityCLIGateway() if Config.backend == "cli" else AntigravityGateway()
         if not payload.get("stream"):
             try:
                 self._send_json(200, gateway.complete(payload))
@@ -1160,6 +1414,31 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(exc.status if 400 <= exc.status < 600 else 502, str(exc), exc.body)
             except Exception as exc:
                 self._error(500, f"网关内部错误：{exc}")
+            return
+
+        if Config.backend == "cli":
+            try:
+                result = gateway.complete(payload)
+            except GatewayError as exc:
+                self._error(exc.status if 400 <= exc.status < 600 else 502, str(exc), exc.body)
+                return
+            except Exception as exc:
+                self._error(500, f"网关内部错误：{exc}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                for chunk in _cli_stream_chunks(result):
+                    data = json.dumps(chunk, ensure_ascii=False)
+                    self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
 
         try:
@@ -1208,6 +1487,10 @@ def _apply_args(args: argparse.Namespace) -> None:
         Config.timeout = args.timeout
     if args.api_key is not None:
         Config.api_key = args.api_key
+    if args.backend is not None:
+        Config.backend = args.backend
+    if args.cli_command is not None:
+        Config.cli_command = args.cli_command
     if args.auth_file is not None:
         Config.auth_file = os.path.abspath(os.path.expanduser(args.auth_file))
     if args.models:
@@ -1217,12 +1500,19 @@ def _apply_args(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity OAuth OpenAI-compatible gateway")
-    parser.add_argument("command", nargs="?", choices=("serve", "login", "auth-status"), default="serve")
+    parser = argparse.ArgumentParser(description="Official Antigravity CLI OpenAI-compatible gateway")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("serve", "login", "auth-status", "fix-crlf"),
+        default="serve",
+    )
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--api-key")
+    parser.add_argument("--backend", choices=("cli", "direct"))
+    parser.add_argument("--cli-command", help="official Antigravity CLI command/path (default: agy)")
     parser.add_argument("--auth-file")
     parser.add_argument("--models", help="comma-separated model IDs")
     parser.add_argument("--callback-port", type=int)
@@ -1232,25 +1522,137 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def fix_crlf_in_tree(root: Optional[str] = None) -> List[str]:
+    """Strip CR from shell/Python sources so Linux shebangs work after Windows copy.
+
+    Returns paths that were rewritten. Safe to call on every startup.
+    """
+    base = os.path.abspath(root or BASE_DIR)
+    fixed: List[str] = []
+    for name in os.listdir(base):
+        if not name.endswith((".sh", ".py", ".md")):
+            continue
+        path = os.path.join(base, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        if b"\r" not in data:
+            continue
+        cleaned = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        try:
+            with open(path, "wb") as handle:
+                handle.write(cleaned)
+            if name.endswith(".sh"):
+                try:
+                    os.chmod(path, 0o755)
+                except OSError:
+                    pass
+            fixed.append(path)
+        except OSError:
+            continue
+    return fixed
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    fixed = fix_crlf_in_tree()
+    for path in fixed:
+        print(f"{FINGERPRINT} 已去除 Windows CRLF：{path}", flush=True)
     args = build_parser().parse_args(argv)
     _apply_args(args)
+    if args.command == "fix-crlf":
+        if fixed:
+            print(f"已修复 {len(fixed)} 个文件")
+        else:
+            print("无需修复（未发现 CRLF）")
+        return 0
     if args.command == "login":
+        if Config.backend == "cli":
+            os.makedirs(RUNTIME_DIR, exist_ok=True)
+            if not antigravity_cli_available():
+                print("ERROR: 未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli")
+                return 1
+            print("将启动官方 agy 登录；账号凭据由 agy 保存在当前用户本地，不写入代码。")
+            return subprocess.call(_cli_argv(), cwd=RUNTIME_DIR)
         oauth_login(Config.auth_file, Config.callback_port, args.open_browser and not args.no_browser)
         return 0
     if args.command == "auth-status":
+        if Config.backend == "cli":
+            if not antigravity_cli_available():
+                print("未安装 agy")
+                return 1
+            os.makedirs(RUNTIME_DIR, exist_ok=True)
+            try:
+                completed = subprocess.run(
+                    _cli_argv() + ["models"], cwd=RUNTIME_DIR,
+                    timeout=min(Config.timeout, 60), check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"无法检查 agy 登录状态：{exc}")
+                return 1
+            if completed.returncode == 0:
+                print("agy 本地登录可用（上方为当前账号可用模型）")
+            else:
+                print("agy 尚未完成登录或登录已失效；请运行 ./run.sh login")
+            return completed.returncode
         store = TokenStore()
         if not store.exists():
             print("未登录")
             return 1
         record = store.load()
+        store.hydrate_oauth_config()
+        client_id, client_secret = _oauth_client_credentials(record)
         print(f"账号：{record.get('email') or 'unknown'}")
         print(f"项目：{record.get('project_id') or 'unknown'}")
         print(f"到期：{record.get('expired') or 'unknown'}")
         print(f"凭证：{store.path}")
+        if client_id and client_secret:
+            print("OAuth Client：已配置（env 或凭证文件）")
+        else:
+            print(
+                "OAuth Client：缺失 — token 刷新会失败。"
+                "请设置 ANTIGRAVITY_OAUTH_CLIENT_ID/SECRET 后重新 ./run.sh login"
+            )
+            return 2
         return 0
-    if not TokenStore().exists():
+    if Config.backend not in ("cli", "direct"):
+        print("ERROR: ANTIGRAVITY_BACKEND 只支持 cli 或 direct", flush=True)
+        return 1
+    if Config.backend == "cli":
+        if not antigravity_cli_available():
+            print("ERROR: 未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli", flush=True)
+            return 1
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        httpd = ThreadingHTTPServer((Config.host, Config.port), Handler)
+        print(
+            f"{FINGERPRINT} listening on http://{Config.host}:{Config.port} "
+            f"(backend=cli, auth=agy local user profile)",
+            flush=True,
+        )
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
+        return 0
+
+    store = TokenStore()
+    if not store.exists():
         print("ERROR: 尚未登录 Antigravity，请先运行：python server.py login", flush=True)
+        return 1
+    store.hydrate_oauth_config()
+    client_id, client_secret = _oauth_client_credentials(store.load())
+    if not client_id or not client_secret:
+        print(
+            "ERROR: 缺少 OAuth Client ID/Secret。"
+            "token 刷新会报 Could not determine client ID from request。"
+            "请配置 ANTIGRAVITY_OAUTH_CLIENT_ID / ANTIGRAVITY_OAUTH_CLIENT_SECRET 后重新 login。",
+            flush=True,
+        )
         return 1
     os.makedirs(RUNTIME_DIR, exist_ok=True)
     httpd = ThreadingHTTPServer((Config.host, Config.port), Handler)

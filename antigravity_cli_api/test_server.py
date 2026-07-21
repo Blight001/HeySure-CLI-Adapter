@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import server
 
@@ -62,6 +63,10 @@ class FakeGoogleHandler(BaseHTTPRequestHandler):
     def assert_form(form):
         if form.get("grant_type") != ["refresh_token"]:
             raise AssertionError(form)
+        if not form.get("client_id") or not form.get("client_id")[0]:
+            raise AssertionError(f"missing client_id: {form}")
+        if not form.get("client_secret") or not form.get("client_secret")[0]:
+            raise AssertionError(f"missing client_secret: {form}")
 
     @staticmethod
     def response(text, finish="STOP"):
@@ -93,6 +98,7 @@ class GatewayTest(unittest.TestCase):
             for name in (
                 "auth_file", "base_urls", "token_endpoint", "userinfo_endpoint",
                 "version_manifest", "user_agent", "models", "api_key",
+                "client_id", "client_secret", "backend", "cli_command",
             )
         }
         cls.temp = tempfile.TemporaryDirectory()
@@ -109,6 +115,10 @@ class GatewayTest(unittest.TestCase):
         server.Config.user_agent = "antigravity/hub/test linux/amd64"
         server.Config.models = ["gemini-test"]
         server.Config.api_key = ""
+        server.Config.client_id = "test-client-id"
+        server.Config.client_secret = "test-client-secret"
+        server.Config.backend = "direct"
+        server.Config.cli_command = "agy"
         server.TokenStore().save({
             "type": "antigravity",
             "access_token": "expired-token",
@@ -116,6 +126,8 @@ class GatewayTest(unittest.TestCase):
             "project_id": "student-project",
             "email": "student@example.com",
             "expired": "2000-01-01T00:00:00Z",
+            "client_id": "test-client-id",
+            "client_secret": "test-client-secret",
         })
 
         cls.gateway = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -211,6 +223,89 @@ class GatewayTest(unittest.TestCase):
                 self.assertEqual(response.status, 200)
         finally:
             server.Config.api_key = ""
+
+    def test_07_refresh_uses_auth_file_client_when_env_empty(self):
+        saved_id, saved_secret = server.Config.client_id, server.Config.client_secret
+        try:
+            server.Config.client_id = ""
+            server.Config.client_secret = ""
+            store = server.TokenStore()
+            store.save({
+                "type": "antigravity",
+                "access_token": "stale",
+                "refresh_token": "refresh-token",
+                "project_id": "student-project",
+                "email": "student@example.com",
+                "expired": "2000-01-01T00:00:00Z",
+                "client_id": "file-client-id",
+                "client_secret": "file-client-secret",
+            })
+            token, record = store.refresh(force=True)
+            self.assertEqual(token, "refreshed-token")
+            self.assertEqual(record.get("client_id"), "file-client-id")
+            self.assertEqual(server.Config.client_id, "file-client-id")
+        finally:
+            server.Config.client_id = saved_id
+            server.Config.client_secret = saved_secret
+            server.TokenStore().save({
+                "type": "antigravity",
+                "access_token": "refreshed-token",
+                "refresh_token": "refresh-token",
+                "project_id": "student-project",
+                "email": "student@example.com",
+                "expired": "2099-01-01T00:00:00Z",
+                "client_id": "test-client-id",
+                "client_secret": "test-client-secret",
+            })
+
+    def test_08_refresh_fails_clearly_without_client_id(self):
+        saved_id, saved_secret = server.Config.client_id, server.Config.client_secret
+        try:
+            server.Config.client_id = ""
+            server.Config.client_secret = ""
+            store = server.TokenStore()
+            store.save({
+                "type": "antigravity",
+                "access_token": "stale",
+                "refresh_token": "refresh-token",
+                "project_id": "student-project",
+                "expired": "2000-01-01T00:00:00Z",
+            })
+            with self.assertRaises(server.GatewayError) as caught:
+                store.refresh(force=True)
+            self.assertIn("OAuth Client", str(caught.exception))
+        finally:
+            server.Config.client_id = saved_id
+            server.Config.client_secret = saved_secret
+
+    def test_09_cli_backend_uses_official_command_without_credentials(self):
+        payload = {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "只说中文"},
+                {"role": "user", "content": "查询天气"},
+            ],
+            "tools": [{"type": "function", "function": {
+                "name": "weather.lookup",
+                "description": "查天气",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            }}],
+        }
+        completed = mock.Mock(returncode=0, stdout="\x1b[32m测试成功\x1b[0m\n", stderr="")
+        saved_models = server.Config.models
+        server.Config.models = ["Gemini Test"]
+        try:
+            with mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+                result = server.AntigravityCLIGateway().complete(payload)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:3], ["agy", "--model", "Gemini Test"])
+            prompt = argv[-1]
+            self.assertIn("weather.lookup", prompt)
+            self.assertIn("<mcp-call>", prompt)
+            self.assertNotIn("client_secret", " ".join(argv).lower())
+            self.assertEqual(result["choices"][0]["message"]["content"], "测试成功")
+        finally:
+            server.Config.models = saved_models
 
 
 if __name__ == "__main__":
