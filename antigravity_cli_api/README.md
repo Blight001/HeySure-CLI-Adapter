@@ -84,17 +84,27 @@ sed -i 's/\r$//' run.sh && ./run.sh
 
 ```text
 显示名称：Antigravity Gemini
-模型名：  Gemini 3.1 Pro (Low)
+模型名：  gemini-3.5-flash-medium
 Base URL：http://127.0.0.1:8110/v1/chat/completions
 API Key： <脚本生成的本地网关密钥>
 接口协议：OpenAI 兼容
 工具协议：文本 MCP Call
 ```
 
-模型名称应使用 `./run.sh auth-status`（即 `agy models`）实际列出的名称。可在 `.env` 覆盖：
+已实测可用的模型 ID：
+
+| 模型 ID | agy 显示名称 |
+| --- | --- |
+| `gemini-3.5-flash-medium` | Gemini 3.5 Flash (Medium) |
+| `gemini-3.5-flash-high` | Gemini 3.5 Flash (High) |
+| `gemini-3.5-flash-low` | Gemini 3.5 Flash (Low) |
+| `gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) |
+| `gemini-3.1-pro-high` | Gemini 3.1 Pro (High) |
+
+账号最终可用模型仍以 `./run.sh auth-status`（即 `agy models`）为准。可在 `.env` 覆盖：
 
 ```bash
-export ANTIGRAVITY_MODELS='Gemini 3.1 Pro (Low),Gemini 3.5 Flash (Low)'
+export ANTIGRAVITY_MODELS='gemini-3.5-flash-medium,gemini-3.1-pro-low'
 ```
 
 请求中的 `model: "auto"` 会选择列表中的第一个模型。
@@ -106,7 +116,7 @@ curl http://127.0.0.1:8110/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <ANTIGRAVITY_API_KEY>' \
   -d '{
-    "model": "Gemini 3.1 Pro (Low)",
+    "model": "gemini-3.5-flash-medium",
     "messages": [{"role":"user","content":"只回复 ok"}]
   }'
 ```
@@ -126,8 +136,13 @@ HeySure 会在 `X-HeySure-Session-ID` 请求头中发送匿名、稳定的会话
 - 同一会话串行执行，不同会话可并行，避免 `--continue` 串线。
 
 当单轮新增内容仍超过安全字节数时，网关把完整内容临时写入该会话工作目录，命令行
-只向 `agy -p` 传递短的 `@文件`引用。`agy` 完成读取后临时文件立即删除。因此 Linux
-单参数约 128 KiB 的限制不会再迫使网关截断模型上下文。
+只向 `agy -p` 传递短的文件引用，并明确要求使用工作区内自动授权的 `read_file`，
+不会开放 `command` 或危险的全工具免确认权限。`agy` 完成读取后临时文件立即删除。
+因此 Linux 单参数约 128 KiB 的限制不会再迫使网关截断模型上下文。
+
+部分 `agy` 版本在无头 `-p` 模式下偶尔会生成成功却丢失 stdout。每次调用使用独立
+CLI 日志定位本轮 conversation；仅当退出码为 0 且 stdout/stderr 都为空时，网关才从
+官方本地 `transcript.jsonl` 恢复最后一条已完成回复。临时调用日志随后删除。
 
 会话状态位于 `runtime/cli-sessions/`（root 部署时是服务目录下的 runtime），只用于
 本地续接和幂等重试，已被 Git 忽略。
@@ -187,7 +202,7 @@ Linux 可写入同目录 `.env`：
 | `ANTIGRAVITY_CLI_COMMAND` | 自动发现 `agy` | agy 可执行文件路径 |
 | `ANTIGRAVITY_CLI_ARG_SAFE_BYTES` | `98304` | 超过此 UTF-8 字节数改用临时文件，不进入单个命令行参数 |
 | `ANTIGRAVITY_CLI_SESSIONS_DIR` | `runtime/cli-sessions` | 本地会话映射、工作目录与重试状态 |
-| `ANTIGRAVITY_MODELS` | 官方模型显示名列表 | `/v1/models` 返回值，逗号分隔 |
+| `ANTIGRAVITY_MODELS` | 上表 5 个模型 ID | `/v1/models` 返回值，逗号分隔 |
 | `ANTIGRAVITY_HOST` | `127.0.0.1` | 网关监听地址 |
 | `ANTIGRAVITY_PORT` | `8110` | 网关端口 |
 | `ANTIGRAVITY_TIMEOUT` | `600` | 单次 agy 调用超时秒数 |

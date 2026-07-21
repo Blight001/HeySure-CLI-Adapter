@@ -86,7 +86,8 @@ class Config:
     )
     models = _env_list(
         "ANTIGRAVITY_MODELS",
-        "Gemini 3.1 Pro (Low),Gemini 3.5 Flash (Low),Gemini 3.5 Flash (High)",
+        "gemini-3.5-flash-medium,gemini-3.5-flash-high,gemini-3.5-flash-low,"
+        "gemini-3.1-pro-low,gemini-3.1-pro-high",
     )
     client_id = os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_ID", "").strip()
     client_secret = os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "").strip()
@@ -1364,6 +1365,67 @@ def _openai_completion(
     return result
 
 
+_CONVERSATION_ID_RE = re.compile(
+    r"(?:conversation(?:=|\s+)|created conversation[^0-9a-f]*)"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _agy_data_root() -> str:
+    return os.path.abspath(
+        os.path.expanduser(
+            os.environ.get(
+                "ANTIGRAVITY_CLI_DATA_DIR", "~/.gemini/antigravity-cli"
+            )
+        )
+    )
+
+
+def _recover_agy_transcript(run_log_path: str) -> str:
+    """Recover the current turn when agy print mode drops stdout."""
+    try:
+        with open(run_log_path, "r", encoding="utf-8", errors="replace") as handle:
+            log_text = handle.read()
+    except OSError:
+        return ""
+    matches = _CONVERSATION_ID_RE.findall(log_text)
+    if not matches:
+        return ""
+    transcript_path = os.path.join(
+        _agy_data_root(),
+        "brain",
+        matches[-1],
+        ".system_generated",
+        "logs",
+        "transcript.jsonl",
+    )
+    last_after_user = ""
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if str(event.get("type") or "").upper() == "USER_INPUT":
+                    last_after_user = ""
+                    continue
+                if (
+                    str(event.get("source") or "").upper() == "MODEL"
+                    and str(event.get("type") or "").upper() == "PLANNER_RESPONSE"
+                    and str(event.get("status") or "DONE").upper() == "DONE"
+                    and isinstance(event.get("content"), str)
+                    and event["content"].strip()
+                ):
+                    last_after_user = event["content"].strip()
+    except OSError:
+        return ""
+    return last_after_user
+
+
 class AntigravityCLIGateway:
     """OpenAI adapter for the official ``agy`` CLI.
 
@@ -1376,6 +1438,7 @@ class AntigravityCLIGateway:
         os.makedirs(cwd, mode=0o700, exist_ok=True)
         cli_prompt = prompt
         prompt_path = ""
+        run_log_path = os.path.join(cwd, f"agy-run-{uuid.uuid4().hex}.log")
         safe_bytes = max(8192, int(Config.cli_arg_safe_bytes or 96 * 1024))
         if len(prompt.encode("utf-8")) > safe_bytes:
             prompt_name = f"heysure-prompt-{uuid.uuid4().hex}.md"
@@ -1387,9 +1450,10 @@ class AntigravityCLIGateway:
             except OSError:
                 pass
             cli_prompt = (
-                f"请先完整载入并遵循附件 @{prompt_name} 中的全部内容。"
-                "该附件就是本轮完整输入，不得只根据文件名猜测；读取后直接给出其中要求的"
-                " Assistant 回复，不要解释读取过程。"
+                f"必须调用内置 read_file 工具读取当前工作区的 @{prompt_name}；"
+                "禁止使用 command、run_command、shell 或终端命令读取。该文件就是本轮"
+                "完整输入，请完整遵循，不得只根据文件名猜测。读取后直接给出文件所要求的"
+                " Assistant 回复，不要解释读取过程，也不要修改任何文件。"
             )
 
         argv = _cli_argv()
@@ -1398,48 +1462,54 @@ class AntigravityCLIGateway:
         argv += [
             "--model", model,
             "--print-timeout", f"{max(1, Config.timeout)}s",
+            "--log-file", run_log_path,
             "-p", cli_prompt,
         ]
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=Config.timeout + 15,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise GatewayError("未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli", status=503) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise GatewayError(f"agy 响应超时（{Config.timeout} 秒）", status=504) from exc
-        except OSError as exc:
-            if getattr(exc, "errno", None) == 7:
-                raise GatewayError(
-                    "启动 agy 时参数仍超过系统限制；请降低 ANTIGRAVITY_CLI_ARG_SAFE_BYTES",
-                    status=500,
-                ) from exc
-            raise GatewayError(f"无法启动 agy：{exc}", status=500) from exc
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=Config.timeout + 15,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise GatewayError("未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli", status=503) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise GatewayError(f"agy 响应超时（{Config.timeout} 秒）", status=504) from exc
+            except OSError as exc:
+                if getattr(exc, "errno", None) == 7:
+                    raise GatewayError(
+                        "启动 agy 时参数仍超过系统限制；请降低 ANTIGRAVITY_CLI_ARG_SAFE_BYTES",
+                        status=500,
+                    ) from exc
+                raise GatewayError(f"无法启动 agy：{exc}", status=500) from exc
+            answer = _ANSI_RE.sub("", completed.stdout or "").strip()
+            detail = _ANSI_RE.sub("", completed.stderr or "").strip()
+            if completed.returncode != 0:
+                hint = (detail or answer or f"agy 退出码 {completed.returncode}")[-4000:]
+                lowered = hint.lower()
+                status = 401 if any(word in lowered for word in ("login", "sign in", "authenticate", "oauth")) else 502
+                raise GatewayError("agy 调用失败；请运行 ./run.sh auth-status 检查本地登录", status=status, body=hint)
+            if not answer and not detail:
+                answer = _recover_agy_transcript(run_log_path)
+            if not answer:
+                raise GatewayError("agy 未返回内容", status=502, body=detail[-4000:])
+            return answer
         finally:
-            if prompt_path:
+            for local_path in (prompt_path, run_log_path):
+                if not local_path:
+                    continue
                 try:
-                    os.remove(prompt_path)
+                    os.remove(local_path)
                 except OSError:
                     pass
-        answer = _ANSI_RE.sub("", completed.stdout or "").strip()
-        detail = _ANSI_RE.sub("", completed.stderr or "").strip()
-        if completed.returncode != 0:
-            hint = (detail or answer or f"agy 退出码 {completed.returncode}")[-4000:]
-            lowered = hint.lower()
-            status = 401 if any(word in lowered for word in ("login", "sign in", "authenticate", "oauth")) else 502
-            raise GatewayError("agy 调用失败；请运行 ./run.sh auth-status 检查本地登录", status=status, body=hint)
-        if not answer:
-            raise GatewayError("agy 未返回内容", status=502, body=detail[-4000:])
-        return answer
 
     def _complete_session(
         self,
@@ -1540,7 +1610,7 @@ class AntigravityCLIGateway:
     def complete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         model = str(payload.get("model") or "auto").strip()
         if model.lower() == "auto":
-            model = Config.models[0] if Config.models else "Gemini 3.1 Pro (Low)"
+            model = Config.models[0] if Config.models else "gemini-3.5-flash-medium"
         full_prompt = openai_to_cli_prompt(payload)
         session_identity = str(
             payload.get("_heysure_session_id") or payload.get("user") or ""

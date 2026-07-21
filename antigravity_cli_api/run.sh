@@ -90,7 +90,7 @@ load_env() {
   export ANTIGRAVITY_CLI_COMMAND="${ANTIGRAVITY_CLI_COMMAND:-agy}"
   export ANTIGRAVITY_CLI_ARG_SAFE_BYTES="${ANTIGRAVITY_CLI_ARG_SAFE_BYTES:-98304}"
   export ANTIGRAVITY_CLI_SESSIONS_DIR="${ANTIGRAVITY_CLI_SESSIONS_DIR:-$RUNTIME_DIR/cli-sessions}"
-  export ANTIGRAVITY_MODELS="${ANTIGRAVITY_MODELS:-Gemini 3.1 Pro (Low),Gemini 3.5 Flash (Low),Gemini 3.5 Flash (High)}"
+  export ANTIGRAVITY_MODELS="${ANTIGRAVITY_MODELS:-gemini-3.5-flash-medium,gemini-3.5-flash-high,gemini-3.5-flash-low,gemini-3.1-pro-low,gemini-3.1-pro-high}"
   export ANTIGRAVITY_RUN_USER="${ANTIGRAVITY_RUN_USER:-antigravity-api}"
   export ANTIGRAVITY_AUTH_FILE="${ANTIGRAVITY_AUTH_FILE:-$AUTH_FILE}"
   export ANTIGRAVITY_PUBLIC_BASE_URL="${ANTIGRAVITY_PUBLIC_BASE_URL:-}"

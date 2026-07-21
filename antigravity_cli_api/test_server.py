@@ -368,6 +368,8 @@ class GatewayTest(unittest.TestCase):
             short_prompt = argv[-1]
             match = server.re.search(r"@([A-Za-z0-9_.-]+)", short_prompt)
             self.assertIsNotNone(match)
+            self.assertIn("read_file", short_prompt)
+            self.assertIn("禁止使用 command", short_prompt)
             prompt_path = os.path.join(kwargs["cwd"], match.group(1))
             self.assertTrue(os.path.isfile(prompt_path))
             with open(prompt_path, "r", encoding="utf-8") as handle:
@@ -439,6 +441,53 @@ class GatewayTest(unittest.TestCase):
         self.assertNotIn("--continue", second_call.args[0])
         self.assertNotEqual(first_call.kwargs["cwd"], second_call.kwargs["cwd"])
         self.assertTrue(second_call.kwargs["cwd"].endswith("generation-000001"))
+
+    def test_15_empty_stdout_is_recovered_from_current_transcript(self):
+        conversation_id = "12345678-1234-1234-1234-123456789abc"
+        data_root = os.path.join(self.temp.name, "agy-data")
+        transcript_dir = os.path.join(
+            data_root,
+            "brain",
+            conversation_id,
+            ".system_generated",
+            "logs",
+        )
+        os.makedirs(transcript_dir, exist_ok=True)
+        transcript_path = os.path.join(transcript_dir, "transcript.jsonl")
+        with open(transcript_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "USER_INPUT", "content": "旧问题"}) + "\n")
+            handle.write(json.dumps({
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "旧回复",
+            }, ensure_ascii=False) + "\n")
+            handle.write(json.dumps({"type": "USER_INPUT", "content": "新问题"}) + "\n")
+            handle.write(json.dumps({
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "从 transcript 恢复的回复",
+            }, ensure_ascii=False) + "\n")
+
+        def fake_run(argv, **_kwargs):
+            log_path = argv[argv.index("--log-file") + 1]
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write(f"Print mode: conversation={conversation_id}\n")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        payload = {
+            "user": "heysure-session-transcript-recovery",
+            "model": "gemini-3.5-flash-low",
+            "messages": [{"role": "user", "content": "恢复测试"}],
+        }
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_CLI_DATA_DIR": data_root}):
+            with mock.patch.object(server.subprocess, "run", side_effect=fake_run):
+                result = server.AntigravityCLIGateway().complete(payload)
+        self.assertEqual(
+            result["choices"][0]["message"]["content"],
+            "从 transcript 恢复的回复",
+        )
 
 
 if __name__ == "__main__":
