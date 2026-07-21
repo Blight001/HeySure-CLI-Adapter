@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pure-Python Antigravity OAuth -> OpenAI-compatible gateway manager.
+# Pure-Python Antigravity OAuth -> OpenAI-compatible Linux gateway manager.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
