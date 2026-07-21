@@ -99,6 +99,7 @@ class GatewayTest(unittest.TestCase):
                 "auth_file", "base_urls", "token_endpoint", "userinfo_endpoint",
                 "version_manifest", "user_agent", "models", "api_key",
                 "client_id", "client_secret", "backend", "cli_command",
+                "cli_arg_safe_bytes", "cli_sessions_dir",
             )
         }
         cls.temp = tempfile.TemporaryDirectory()
@@ -119,6 +120,8 @@ class GatewayTest(unittest.TestCase):
         server.Config.client_secret = "test-client-secret"
         server.Config.backend = "direct"
         server.Config.cli_command = "agy"
+        server.Config.cli_arg_safe_bytes = 96 * 1024
+        server.Config.cli_sessions_dir = os.path.join(cls.temp.name, "cli-sessions")
         server.TokenStore().save({
             "type": "antigravity",
             "access_token": "expired-token",
@@ -306,6 +309,136 @@ class GatewayTest(unittest.TestCase):
             self.assertEqual(result["choices"][0]["message"]["content"], "测试成功")
         finally:
             server.Config.models = saved_models
+
+    def test_10_stateful_cli_sends_only_incremental_messages(self):
+        first = mock.Mock(returncode=0, stdout="第一次回复\n", stderr="")
+        second = mock.Mock(returncode=0, stdout="第二次回复\n", stderr="")
+        gateway = server.AntigravityCLIGateway()
+        initial = {
+            "user": "heysure-session-incremental",
+            "model": "Gemini Test",
+            "messages": [
+                {"role": "system", "content": "只说中文"},
+                {"role": "user", "content": "第一问"},
+            ],
+        }
+        follow_up = {
+            **initial,
+            "messages": initial["messages"] + [
+                {"role": "assistant", "content": "第一次回复"},
+                {"role": "user", "content": "第二问"},
+            ],
+        }
+        with mock.patch.object(server.subprocess, "run", side_effect=[first, second]) as run:
+            gateway.complete(initial)
+            result = gateway.complete(follow_up)
+        first_argv = run.call_args_list[0].args[0]
+        second_argv = run.call_args_list[1].args[0]
+        self.assertNotIn("--continue", first_argv)
+        self.assertIn("--continue", second_argv)
+        self.assertIn("第二问", second_argv[-1])
+        self.assertNotIn("只说中文", second_argv[-1])
+        self.assertEqual(
+            run.call_args_list[0].kwargs["cwd"],
+            run.call_args_list[1].kwargs["cwd"],
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "第二次回复")
+
+    def test_11_stateful_cli_retries_return_cached_response(self):
+        completed = mock.Mock(returncode=0, stdout="不会重复扣额度\n", stderr="")
+        payload = {
+            "user": "heysure-session-retry",
+            "model": "Gemini Test",
+            "messages": [{"role": "user", "content": "幂等测试"}],
+        }
+        gateway = server.AntigravityCLIGateway()
+        with mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            gateway.complete(payload)
+            retried = gateway.complete(payload)
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(retried.get("cached"))
+        self.assertEqual(retried["choices"][0]["message"]["content"], "不会重复扣额度")
+
+    def test_12_long_prompt_is_attached_from_local_file(self):
+        saved_limit = server.Config.cli_arg_safe_bytes
+        server.Config.cli_arg_safe_bytes = 8192
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            short_prompt = argv[-1]
+            match = server.re.search(r"@([A-Za-z0-9_.-]+)", short_prompt)
+            self.assertIsNotNone(match)
+            prompt_path = os.path.join(kwargs["cwd"], match.group(1))
+            self.assertTrue(os.path.isfile(prompt_path))
+            with open(prompt_path, "r", encoding="utf-8") as handle:
+                captured["content"] = handle.read()
+            captured["path"] = prompt_path
+            captured["argv_prompt"] = short_prompt
+            return mock.Mock(returncode=0, stdout="长上下文成功\n", stderr="")
+
+        payload = {
+            "user": "heysure-session-long-prompt",
+            "model": "Gemini Test",
+            "messages": [{"role": "user", "content": "长内容" * 5000}],
+        }
+        try:
+            with mock.patch.object(server.subprocess, "run", side_effect=fake_run):
+                result = server.AntigravityCLIGateway().complete(payload)
+        finally:
+            server.Config.cli_arg_safe_bytes = saved_limit
+        self.assertIn("长内容" * 100, captured["content"])
+        self.assertLess(len(captured["argv_prompt"].encode("utf-8")), 8192)
+        self.assertFalse(os.path.exists(captured["path"]))
+        self.assertEqual(result["choices"][0]["message"]["content"], "长上下文成功")
+
+    def test_13_http_session_header_reaches_cli_gateway(self):
+        captured = {}
+
+        def fake_complete(_gateway, payload):
+            captured.update(payload)
+            return server._openai_completion("Gemini Test", "header ok", "test")
+
+        saved_backend = server.Config.backend
+        server.Config.backend = "cli"
+        request = urllib.request.Request(
+            self.base + "/v1/chat/completions",
+            data=json.dumps({
+                "model": "Gemini Test",
+                "messages": [{"role": "user", "content": "test"}],
+            }).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-HeySure-Session-ID": "anonymous-session-id",
+            },
+        )
+        try:
+            with mock.patch.object(server.AntigravityCLIGateway, "complete", fake_complete):
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    self.assertEqual(json.load(response)["choices"][0]["message"]["content"], "header ok")
+        finally:
+            server.Config.backend = saved_backend
+        self.assertEqual(captured.get("_heysure_session_id"), "anonymous-session-id")
+
+    def test_14_rewritten_history_starts_a_new_cli_generation(self):
+        completed = mock.Mock(returncode=0, stdout="回复\n", stderr="")
+        gateway = server.AntigravityCLIGateway()
+        initial = {
+            "user": "heysure-session-rewritten-history",
+            "model": "Gemini Test",
+            "messages": [{"role": "user", "content": "原始问题"}],
+        }
+        rewritten = {
+            **initial,
+            "messages": [{"role": "user", "content": "压缩后的上下文"}],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            gateway.complete(initial)
+            gateway.complete(rewritten)
+        first_call, second_call = run.call_args_list
+        self.assertNotIn("--continue", first_call.args[0])
+        self.assertNotIn("--continue", second_call.args[0])
+        self.assertNotEqual(first_call.kwargs["cwd"], second_call.kwargs["cwd"])
+        self.assertTrue(second_call.kwargs["cwd"].endswith("generation-000001"))
 
 
 if __name__ == "__main__":

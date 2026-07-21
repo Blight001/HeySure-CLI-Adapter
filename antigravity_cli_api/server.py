@@ -67,6 +67,15 @@ class Config:
     api_key = os.environ.get("ANTIGRAVITY_API_KEY", "").strip()
     backend = os.environ.get("ANTIGRAVITY_BACKEND", "cli").strip().lower()
     cli_command = os.environ.get("ANTIGRAVITY_CLI_COMMAND", "agy").strip() or "agy"
+    cli_arg_safe_bytes = _env_int("ANTIGRAVITY_CLI_ARG_SAFE_BYTES", 96 * 1024)
+    cli_sessions_dir = os.path.abspath(
+        os.path.expanduser(
+            os.environ.get(
+                "ANTIGRAVITY_CLI_SESSIONS_DIR",
+                os.path.join(RUNTIME_DIR, "cli-sessions"),
+            )
+        )
+    )
     auth_file = os.path.abspath(
         os.path.expanduser(
             os.environ.get(
@@ -1176,10 +1185,9 @@ def _content_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-def openai_to_cli_prompt(payload: Dict[str, Any]) -> str:
-    """Serialize an OpenAI conversation for ``agy --print`` without credentials."""
+def _serialize_cli_messages(messages: Iterable[Dict[str, Any]]) -> str:
     transcript: List[str] = []
-    for message in payload.get("messages") or []:
+    for message in messages:
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "user").lower()
@@ -1201,39 +1209,159 @@ def openai_to_cli_prompt(payload: Dict[str, Any]) -> str:
             body = (body + "\n" if body else "") + "[已调用工具] " + "; ".join(calls)
         if body:
             transcript.append(f"{label}: {body}")
+    return "\n\n".join(transcript)
 
-    tools = payload.get("tools") or []
-    tool_instructions = ""
-    if tools:
-        catalog: List[Dict[str, Any]] = []
-        for item in tools:
-            if not isinstance(item, dict):
-                continue
-            function = item.get("function") or {}
-            if function.get("name"):
-                catalog.append(
-                    {
-                        "name": function.get("name"),
-                        "description": function.get("description") or "",
-                        "parameters": function.get("parameters") or {"type": "object"},
-                    }
-                )
-        if catalog:
-            tool_instructions = (
-                "\n\n[HeySure 工具协议]\n"
-                "需要使用工具时，只输出一个或多个以下格式的块，不要用 Markdown 代码围栏：\n"
-                '<mcp-call>{"tool":"工具名","arguments":{"参数名":"值"}}</mcp-call>\n'
-                "等待平台执行并在下一轮返回结果；不要声称已经执行。可用工具：\n"
-                + json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+
+def _cli_tool_instructions(tools: Iterable[Dict[str, Any]]) -> str:
+    catalog: List[Dict[str, Any]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") or {}
+        if function.get("name"):
+            catalog.append(
+                {
+                    "name": function.get("name"),
+                    "description": function.get("description") or "",
+                    "parameters": function.get("parameters") or {"type": "object"},
+                }
             )
+    if not catalog:
+        return ""
+    return (
+        "\n\n[HeySure 工具协议]\n"
+        "需要使用工具时，只输出一个或多个以下格式的块，不要用 Markdown 代码围栏：\n"
+        '<mcp-call>{"tool":"工具名","arguments":{"参数名":"值"}}</mcp-call>\n'
+        "等待平台执行并在下一轮返回结果；不要声称已经执行。可用工具：\n"
+        + json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def openai_to_cli_prompt(
+    payload: Dict[str, Any],
+    *,
+    messages: Optional[Iterable[Dict[str, Any]]] = None,
+    include_tools: bool = True,
+    continuation: bool = False,
+) -> str:
+    """Serialize OpenAI messages for a new or resumed official agy session."""
+    selected_messages = (payload.get("messages") or []) if messages is None else messages
+    transcript = _serialize_cli_messages(selected_messages)
+    tool_instructions = (
+        _cli_tool_instructions(payload.get("tools") or []) if include_tools else ""
+    )
+    if continuation:
+        return (
+            "你正在继续同一个 HeySure 对话。以下仅包含上次回复之后的新增消息。"
+            "沿用当前 Antigravity 会话中已有的全部系统设定和历史，不要复述旧内容，"
+            "不要输出角色前缀。\n\n"
+            "[新增对话]\n"
+            + (transcript or "（没有新增文本；请应用下面更新后的工具信息。）")
+            + tool_instructions
+            + "\n\n请直接输出下一条 Assistant 回复。"
+        )
     return (
         "你正在通过 HeySure 的 OpenAI 兼容网关继续一段对话。"
         "严格遵守 System/Developer 消息，不要复述转录文本，不要输出角色前缀。\n\n"
         "[对话转录]\n"
-        + ("\n\n".join(transcript) if transcript else "User: （空消息）")
+        + (transcript or "User: （空消息）")
         + tool_instructions
         + "\n\n请直接输出下一条 Assistant 回复。"
     )
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _fingerprint(value: Any) -> str:
+    return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
+
+
+def _message_hashes(messages: Iterable[Dict[str, Any]]) -> List[str]:
+    return [_fingerprint(message) for message in messages if isinstance(message, dict)]
+
+
+def _estimated_tokens(text: str) -> int:
+    # English is commonly ~4 UTF-8 bytes/token, while CJK is closer to one
+    # character/token.  Byte-based estimation avoids the previous 4x CJK
+    # undercount that delayed HeySure's conversation compaction.
+    return max(1, len(text.encode("utf-8")) // 4)
+
+
+_CLI_SESSION_LOCKS: Dict[str, threading.Lock] = {}
+_CLI_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+def _cli_session_lock(session_key: str) -> threading.Lock:
+    with _CLI_SESSION_LOCKS_GUARD:
+        lock = _CLI_SESSION_LOCKS.get(session_key)
+        if lock is None:
+            lock = threading.Lock()
+            _CLI_SESSION_LOCKS[session_key] = lock
+        return lock
+
+
+def _load_cli_session_state(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _save_cli_session_state(path: str, value: Dict[str, Any]) -> None:
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _openai_completion(
+    model: str,
+    answer: str,
+    full_prompt: str,
+    *,
+    cached: bool = False,
+) -> Dict[str, Any]:
+    prompt_tokens = _estimated_tokens(full_prompt)
+    completion_tokens = _estimated_tokens(answer)
+    result: Dict[str, Any] = {
+        "id": "chatcmpl-" + uuid.uuid4().hex,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": answer},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+        "system_fingerprint": FINGERPRINT,
+    }
+    if cached:
+        result["cached"] = True
+    return result
 
 
 class AntigravityCLIGateway:
@@ -1244,20 +1372,38 @@ class AntigravityCLIGateway:
     this Python process.
     """
 
-    def complete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        model = str(payload.get("model") or "auto").strip()
-        if model.lower() == "auto":
-            model = Config.models[0] if Config.models else "Gemini 3.1 Pro (Low)"
-        prompt = openai_to_cli_prompt(payload)
-        argv = _cli_argv() + [
+    def _run_agy(self, prompt: str, model: str, cwd: str, resume: bool) -> str:
+        os.makedirs(cwd, mode=0o700, exist_ok=True)
+        cli_prompt = prompt
+        prompt_path = ""
+        safe_bytes = max(8192, int(Config.cli_arg_safe_bytes or 96 * 1024))
+        if len(prompt.encode("utf-8")) > safe_bytes:
+            prompt_name = f"heysure-prompt-{uuid.uuid4().hex}.md"
+            prompt_path = os.path.join(cwd, prompt_name)
+            with open(prompt_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(prompt)
+            try:
+                os.chmod(prompt_path, 0o600)
+            except OSError:
+                pass
+            cli_prompt = (
+                f"请先完整载入并遵循附件 @{prompt_name} 中的全部内容。"
+                "该附件就是本轮完整输入，不得只根据文件名猜测；读取后直接给出其中要求的"
+                " Assistant 回复，不要解释读取过程。"
+            )
+
+        argv = _cli_argv()
+        if resume:
+            argv.append("--continue")
+        argv += [
             "--model", model,
             "--print-timeout", f"{max(1, Config.timeout)}s",
-            "-p", prompt,
+            "-p", cli_prompt,
         ]
         try:
             completed = subprocess.run(
                 argv,
-                cwd=RUNTIME_DIR,
+                cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1271,6 +1417,19 @@ class AntigravityCLIGateway:
             raise GatewayError("未找到官方 Antigravity CLI（agy），请先运行 ./run.sh install-cli", status=503) from exc
         except subprocess.TimeoutExpired as exc:
             raise GatewayError(f"agy 响应超时（{Config.timeout} 秒）", status=504) from exc
+        except OSError as exc:
+            if getattr(exc, "errno", None) == 7:
+                raise GatewayError(
+                    "启动 agy 时参数仍超过系统限制；请降低 ANTIGRAVITY_CLI_ARG_SAFE_BYTES",
+                    status=500,
+                ) from exc
+            raise GatewayError(f"无法启动 agy：{exc}", status=500) from exc
+        finally:
+            if prompt_path:
+                try:
+                    os.remove(prompt_path)
+                except OSError:
+                    pass
         answer = _ANSI_RE.sub("", completed.stdout or "").strip()
         detail = _ANSI_RE.sub("", completed.stderr or "").strip()
         if completed.returncode != 0:
@@ -1280,25 +1439,118 @@ class AntigravityCLIGateway:
             raise GatewayError("agy 调用失败；请运行 ./run.sh auth-status 检查本地登录", status=status, body=hint)
         if not answer:
             raise GatewayError("agy 未返回内容", status=502, body=detail[-4000:])
-        prompt_tokens = max(1, len(prompt) // 4)
-        completion_tokens = max(1, len(answer) // 4)
-        return {
-            "id": "chatcmpl-" + uuid.uuid4().hex,
-            "object": "chat.completion",
-            "created": int(time.time()),
+        return answer
+
+    def _complete_session(
+        self,
+        payload: Dict[str, Any],
+        model: str,
+        session_identity: str,
+        full_prompt: str,
+    ) -> Dict[str, Any]:
+        session_key = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()
+        session_root = os.path.join(Config.cli_sessions_dir, session_key)
+        state_path = os.path.join(session_root, "state.json")
+        messages = [item for item in (payload.get("messages") or []) if isinstance(item, dict)]
+        current_hashes = _message_hashes(messages)
+        tools_digest = _fingerprint(payload.get("tools") or [])
+        request_digest = _fingerprint({
             "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": answer},
-                "finish_reason": "stop",
-            }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+            "messages": messages,
+            "tools": payload.get("tools") or [],
+            "tool_choice": payload.get("tool_choice"),
+        })
+        state = _load_cli_session_state(state_path)
+        if (
+            state.get("last_request_digest") == request_digest
+            and isinstance(state.get("last_response"), str)
+            and state.get("last_response")
+        ):
+            return _openai_completion(
+                model, str(state["last_response"]), full_prompt, cached=True
+            )
+
+        try:
+            generation = max(0, int(state.get("generation") or 0))
+        except (TypeError, ValueError):
+            generation = 0
+        synced_hashes = state.get("synced_message_hashes") or []
+        can_resume = bool(
+            state
+            and state.get("model") == model
+            and isinstance(synced_hashes, list)
+            and len(current_hashes) >= len(synced_hashes)
+            and current_hashes[: len(synced_hashes)] == synced_hashes
+        )
+        resume_from = len(synced_hashes) if can_resume else 0
+        # HeySure's text-tool parser may trim chatter after the last complete
+        # <mcp-call>.  Accept that stored assistant as the same agy response so
+        # a harmless normalization does not fork the provider conversation.
+        previous_request_hashes = state.get("last_request_message_hashes") or []
+        if (
+            not can_resume
+            and state
+            and state.get("model") == model
+            and isinstance(previous_request_hashes, list)
+            and len(current_hashes) > len(previous_request_hashes)
+            and current_hashes[: len(previous_request_hashes)] == previous_request_hashes
+        ):
+            assistant = messages[len(previous_request_hashes)]
+            previous_answer = str(state.get("last_response") or "")
+            assistant_text = _content_text(assistant.get("content"))
+            if (
+                str(assistant.get("role") or "").lower() == "assistant"
+                and assistant_text
+                and previous_answer.startswith(assistant_text)
+            ):
+                can_resume = True
+                resume_from = len(previous_request_hashes) + 1
+        if can_resume:
+            delta_messages = messages[resume_from:]
+            tools_changed = state.get("tools_digest") != tools_digest
+            prompt = openai_to_cli_prompt(
+                payload,
+                messages=delta_messages,
+                include_tools=tools_changed,
+                continuation=True,
+            )
+        else:
+            if state:
+                generation += 1
+            prompt = full_prompt
+        workspace = os.path.join(session_root, f"generation-{generation:06d}")
+        answer = self._run_agy(prompt, model, workspace, can_resume)
+        assistant_hash = _fingerprint({"role": "assistant", "content": answer})
+        _save_cli_session_state(
+            state_path,
+            {
+                "version": 1,
+                "generation": generation,
+                "model": model,
+                "tools_digest": tools_digest,
+                "synced_message_hashes": current_hashes + [assistant_hash],
+                "last_request_message_hashes": current_hashes,
+                "last_request_digest": request_digest,
+                "last_response": answer,
+                "updated_at": int(time.time()),
             },
-            "system_fingerprint": FINGERPRINT,
-        }
+        )
+        return _openai_completion(model, answer, full_prompt)
+
+    def complete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        model = str(payload.get("model") or "auto").strip()
+        if model.lower() == "auto":
+            model = Config.models[0] if Config.models else "Gemini 3.1 Pro (Low)"
+        full_prompt = openai_to_cli_prompt(payload)
+        session_identity = str(
+            payload.get("_heysure_session_id") or payload.get("user") or ""
+        ).strip()
+        if not session_identity:
+            answer = self._run_agy(full_prompt, model, RUNTIME_DIR, False)
+            return _openai_completion(model, answer, full_prompt)
+        session_key = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()
+        with _cli_session_lock(session_key):
+            return self._complete_session(payload, model, session_identity, full_prompt)
 
 
 def _cli_stream_chunks(result: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -1360,6 +1612,8 @@ class Handler(BaseHTTPRequestHandler):
                     "authenticated": None if cli_backend else store.exists(),
                     "cli_available": antigravity_cli_available() if cli_backend else None,
                     "auth_managed_by": "agy-local-profile" if cli_backend else "gateway-auth-file",
+                    "stateful_sessions": cli_backend,
+                    "cli_arg_safe_bytes": Config.cli_arg_safe_bytes if cli_backend else None,
                     "endpoint": "/v1/chat/completions",
                 },
             )
@@ -1406,6 +1660,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
             self._error(400, "messages must be an array")
             return
+        if Config.backend == "cli" and not payload.get("user"):
+            session_header = self.headers.get("X-HeySure-Session-ID", "").strip()
+            if session_header:
+                payload["_heysure_session_id"] = session_header
         gateway = AntigravityCLIGateway() if Config.backend == "cli" else AntigravityGateway()
         if not payload.get("stream"):
             try:
@@ -1491,6 +1749,10 @@ def _apply_args(args: argparse.Namespace) -> None:
         Config.backend = args.backend
     if args.cli_command is not None:
         Config.cli_command = args.cli_command
+    if args.cli_arg_safe_bytes is not None:
+        Config.cli_arg_safe_bytes = args.cli_arg_safe_bytes
+    if args.cli_sessions_dir is not None:
+        Config.cli_sessions_dir = os.path.abspath(os.path.expanduser(args.cli_sessions_dir))
     if args.auth_file is not None:
         Config.auth_file = os.path.abspath(os.path.expanduser(args.auth_file))
     if args.models:
@@ -1513,6 +1775,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key")
     parser.add_argument("--backend", choices=("cli", "direct"))
     parser.add_argument("--cli-command", help="official Antigravity CLI command/path (default: agy)")
+    parser.add_argument("--cli-arg-safe-bytes", type=int)
+    parser.add_argument("--cli-sessions-dir")
     parser.add_argument("--auth-file")
     parser.add_argument("--models", help="comma-separated model IDs")
     parser.add_argument("--callback-port", type=int)

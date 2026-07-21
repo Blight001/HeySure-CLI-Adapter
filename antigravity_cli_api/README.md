@@ -114,6 +114,24 @@ curl http://127.0.0.1:8110/v1/chat/completions \
 支持 `stream: true` 的 OpenAI SSE 响应格式。由于一次 `agy --print` 调用完成后网关才取得
 最终文本，当前 CLI 后端会在命令完成后分块输出 SSE，不是逐 token 实时流。
 
+## 长对话与 Linux 参数上限
+
+HeySure 会在 `X-HeySure-Session-ID` 请求头中发送匿名、稳定的会话 ID（其他客户端
+也可使用 OpenAI `user` 字段）。网关据此为每个会话建立独立工作目录：
+
+- 第一次请求启动新的 `agy` 会话；
+- 后续请求用 `agy --continue`，只发送上次回复后的新增消息；
+- HeySure 清空、压缩或改写历史后，网关自动换一个新的本地 `agy` 会话；
+- 同一请求因网络问题重试时返回本地缓存，不重复调用模型；
+- 同一会话串行执行，不同会话可并行，避免 `--continue` 串线。
+
+当单轮新增内容仍超过安全字节数时，网关把完整内容临时写入该会话工作目录，命令行
+只向 `agy -p` 传递短的 `@文件`引用。`agy` 完成读取后临时文件立即删除。因此 Linux
+单参数约 128 KiB 的限制不会再迫使网关截断模型上下文。
+
+会话状态位于 `runtime/cli-sessions/`（root 部署时是服务目录下的 runtime），只用于
+本地续接和幂等重试，已被 Git 忽略。
+
 ## 本地凭据放在哪里
 
 - root 执行管理脚本时，默认运行用户是 `antigravity-api`。
@@ -167,6 +185,8 @@ Linux 可写入同目录 `.env`：
 | --- | --- | --- |
 | `ANTIGRAVITY_BACKEND` | `cli` | `cli` 使用官方 agy；`direct` 是旧直连兼容模式 |
 | `ANTIGRAVITY_CLI_COMMAND` | 自动发现 `agy` | agy 可执行文件路径 |
+| `ANTIGRAVITY_CLI_ARG_SAFE_BYTES` | `98304` | 超过此 UTF-8 字节数改用临时文件，不进入单个命令行参数 |
+| `ANTIGRAVITY_CLI_SESSIONS_DIR` | `runtime/cli-sessions` | 本地会话映射、工作目录与重试状态 |
 | `ANTIGRAVITY_MODELS` | 官方模型显示名列表 | `/v1/models` 返回值，逗号分隔 |
 | `ANTIGRAVITY_HOST` | `127.0.0.1` | 网关监听地址 |
 | `ANTIGRAVITY_PORT` | `8110` | 网关端口 |
