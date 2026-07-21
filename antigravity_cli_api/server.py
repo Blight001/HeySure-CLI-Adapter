@@ -1450,8 +1450,9 @@ class AntigravityCLIGateway:
             except OSError:
                 pass
             cli_prompt = (
-                f"必须调用内置 read_file 工具读取当前工作区的 @{prompt_name}；"
-                "禁止使用 command、run_command、shell 或终端命令读取。该文件就是本轮"
+                "必须调用内置 view_file 工具读取文件；参数 AbsolutePath 必须使用这个"
+                f"绝对路径：{prompt_path}。不要传 StartLine 或 EndLine，必须读取完整文件。"
+                "禁止使用 command、run_command、shell 或任何终端命令。该文件就是本轮"
                 "完整输入，请完整遵循，不得只根据文件名猜测。读取后直接给出文件所要求的"
                 " Assistant 回复，不要解释读取过程，也不要修改任何文件。"
             )

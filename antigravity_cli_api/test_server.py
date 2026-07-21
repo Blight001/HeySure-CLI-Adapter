@@ -366,11 +366,15 @@ class GatewayTest(unittest.TestCase):
 
         def fake_run(argv, **kwargs):
             short_prompt = argv[-1]
-            match = server.re.search(r"@([A-Za-z0-9_.-]+)", short_prompt)
-            self.assertIsNotNone(match)
-            self.assertIn("read_file", short_prompt)
+            self.assertIn("view_file", short_prompt)
+            self.assertIn("AbsolutePath", short_prompt)
             self.assertIn("禁止使用 command", short_prompt)
-            prompt_path = os.path.join(kwargs["cwd"], match.group(1))
+            prompt_name = next(
+                name for name in os.listdir(kwargs["cwd"])
+                if name.startswith("heysure-prompt-") and name.endswith(".md")
+            )
+            prompt_path = os.path.join(kwargs["cwd"], prompt_name)
+            self.assertIn(prompt_path, short_prompt)
             self.assertTrue(os.path.isfile(prompt_path))
             with open(prompt_path, "r", encoding="utf-8") as handle:
                 captured["content"] = handle.read()
