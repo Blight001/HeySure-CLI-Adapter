@@ -466,6 +466,53 @@ run_as_service_user() {
   fi
 }
 
+ensure_cli_read_permission() {
+  [[ "$ANTIGRAVITY_BACKEND" == "cli" ]] || return 0
+  local read_rule="read_file($ANTIGRAVITY_CLI_SESSIONS_DIR)"
+  run_as_service_user "$PYTHON_BIN" - "$read_rule" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+rule = sys.argv[1]
+settings_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+try:
+    with open(settings_path, "r", encoding="utf-8") as handle:
+        settings = json.load(handle)
+except FileNotFoundError:
+    settings = {}
+
+if not isinstance(settings, dict):
+    raise SystemExit(f"agy settings 不是 JSON 对象：{settings_path}")
+permissions = settings.setdefault("permissions", {})
+if not isinstance(permissions, dict):
+    raise SystemExit(f"agy permissions 配置格式错误：{settings_path}")
+allow = permissions.setdefault("allow", [])
+if not isinstance(allow, list):
+    raise SystemExit(f"agy permissions.allow 不是数组：{settings_path}")
+if rule in allow:
+    raise SystemExit(0)
+
+allow.append(rule)
+parent = os.path.dirname(settings_path)
+os.makedirs(parent, mode=0o700, exist_ok=True)
+fd, temp_path = tempfile.mkstemp(prefix=".settings-", suffix=".json", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, settings_path)
+finally:
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+PY
+  log "已确认 agy 仅可自动读取长对话临时目录：$ANTIGRAVITY_CLI_SESSIONS_DIR"
+}
+
 pid_of() {
   [[ -f "$PID_FILE" ]] || return 1
   local pid
@@ -541,6 +588,7 @@ cmd_start() {
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || cmd_deps
   ensure_gateway_api_key
   prepare_runtime
+  ensure_cli_read_permission
   require_auth
   if pid="$(pid_of 2>/dev/null)"; then
     log "网关已运行（pid $pid）"
@@ -603,6 +651,7 @@ cmd_fg() {
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || cmd_deps
   ensure_gateway_api_key
   prepare_runtime
+  ensure_cli_read_permission
   require_auth
   log "以前台模式启动，运行用户：$RUN_USER_NAME"
   run_as_service_user "$PYTHON_BIN" "$SERVER_FILE" serve \

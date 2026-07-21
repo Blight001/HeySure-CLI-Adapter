@@ -141,6 +141,10 @@ HeySure 会在 `X-HeySure-Session-ID` 请求头中发送匿名、稳定的会话
 全工具免确认权限。`agy` 完成读取后临时文件立即删除。
 因此 Linux 单参数约 128 KiB 的限制不会再迫使网关截断模型上下文。
 
+`./run.sh start/restart/fg` 会在官方 agy 用户设置中自动加入一条精确的
+`read_file(runtime/cli-sessions)` 规则。它只允许读取网关自己的长对话临时目录，
+不会授权命令执行、文件写入、外部目录读取或全局免确认。
+
 部分 `agy` 版本在无头 `-p` 模式下偶尔会生成成功却丢失 stdout。每次调用使用独立
 CLI 日志定位本轮 conversation；仅当退出码为 0 且 stdout/stderr 都为空时，网关才从
 官方本地 `transcript.jsonl` 恢复最后一条已完成回复。临时调用日志随后删除。
