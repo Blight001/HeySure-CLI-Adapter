@@ -125,6 +125,9 @@ cd /path/to/device/grok_cli
 | `GROK_CLI_TIMEOUT` / `--timeout` | `600` | 单次推理超时（秒），超时杀进程 |
 | `GROK_CLI_API_KEY` / `--api-key` | 空（不校验） | 设置后要求请求携带 `Authorization: Bearer <key>` |
 | `GROK_CLI_MODELS` / `--models` | `grok-4.5` | `GET /v1/models` 展示的模型 id（逗号分隔，仅展示用） |
+| `GROK_CLI_ACP` | `1` | 请求携带 `tools[]` 时启用有状态 ACP 会话；设为 `0` 回退 headless 文本协议 |
+| `GROK_CLI_SESSION_TTL` | `1800` | ACP 会话空闲回收时间（秒） |
+| `GROK_CLI_MAX_SESSIONS` | `6` | 并存 ACP 会话上限（LRU 淘汰） |
 | `XAI_API_KEY` | 空 | 给 **grok CLI** 用的 xAI 密钥（无浏览器环境）；与网关 `GROK_CLI_API_KEY` 不是同一个 |
 | `GROK_CLI_PROXY_HOST` | 空 | 代理主机（IP/域名） |
 | `GROK_CLI_PROXY_PORT` | 空 | 代理端口 |
@@ -161,8 +164,16 @@ cd /path/to/device/grok_cli
 
 ## 实现要点（grok CLI 的坑）
 
-- 每次请求启动一个 CLI 进程：`grok --prompt-file <tmp> --output-format streaming-json ...`，
-  完整对话（含 system prompt）序列化进 prompt 文件，无状态。
+- 带 `tools[]` 的 HeySure 请求默认走 ACP。HeySure 在
+  `X-HeySure-Session-ID` 中发送匿名、稳定的会话 ID，网关据此跨用户轮次
+  复用同一个 `session/prompt`，只发送上轮之后的新增消息。
+- 同一请求因网络问题重试时返回内存缓存，不重复调用 GROK；同一会话
+  串行执行，不同会话仍可并行。
+- HeySure 历史被清空、压缩或改写，或者网关重启/会话 TTL 过期时，自动
+  新建 ACP 会话并全量重放当前历史。
+- 不带 `tools[]` 或禁用 ACP 的请求仍走 headless：每次启动
+  `grok --prompt-file <tmp> --output-format streaming-json ...`，并将完整对话
+  （含 system prompt）序列化进 prompt 文件。
 - grok 拒绝创建零内置工具的会话，最少保留 `--tools todo_write,read_file`
   （`read_file` 同时用于图片输入）；`--tools ""` 与 `--disallowed-tools "*"` 均不生效。
 - prompt 不支持 stdin，必须用 `--prompt-file`。

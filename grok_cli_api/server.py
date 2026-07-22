@@ -5,7 +5,7 @@
 这样任何按 OpenAI 格式调用的客户端（包括 HeySure 服务器的普通 API 模型预设）
 都能直接使用本机 CLI 的订阅额度，服务器端无需任何 CLI 特判。
 
-一次请求 = 启动一个 CLI 进程：
+headless 路径一次请求 = 启动一个 CLI 进程：
 
     <command> --prompt-file <tmp> --output-format streaming-json -m <model> ...
 
@@ -14,8 +14,8 @@ CLI stdout 输出 JSON Lines：
     {"type":"text","data":"..."}      正文增量  → delta.content
     {"type":"end","stopReason":...}   本轮结束  → finish_reason=stop
 
-对话是无状态的：每轮把完整对话（含 system prompt）序列化进 prompt 文件，
-命令行长度与 prompt 大小无关。
+headless 对话无状态：每轮把完整历史序列化进 prompt 文件。携带
+``tools[]`` 的请求默认走 ACP，通过稳定会话 ID 跨用户轮次复用会话。
 
 纯 Python 标准库实现，无第三方依赖。直接运行：
 
@@ -32,6 +32,8 @@ CLI stdout 输出 JSON Lines：
 
 import argparse
 import base64
+import copy
+import hashlib
 import json
 import os
 import re
@@ -535,6 +537,90 @@ def _serialize_tail(tail_msgs: List[Dict], temporary_paths: List[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _fingerprint(value: Any) -> str:
+    raw = json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _message_hashes(messages: List[Dict]) -> List[str]:
+    return [_fingerprint(item) for item in messages if isinstance(item, dict)]
+
+
+def _history_response_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the part HeySure replays on the next request.
+
+    Historical reasoning is deliberately not replayed by the AI runtime, so it
+    must not participate in the append-only comparison.
+    """
+    result: Dict[str, Any] = {
+        "role": "assistant",
+        "content": message.get("content"),
+    }
+    if message.get("tool_calls"):
+        result["tool_calls"] = copy.deepcopy(message["tool_calls"])
+    return result
+
+
+def _resume_message_index(sess, messages: List[Dict]) -> Optional[int]:
+    """Find the first message not already present in a live ACP session.
+
+    Besides an exact prefix, accept HeySure's harmless normalization of the
+    previous assistant text (for example trimming chatter after a tool block).
+    A rewritten/compacted history returns None and must start a new session.
+    """
+    current_hashes = _message_hashes(messages)
+    synced = list(getattr(sess, "synced_message_hashes", None) or [])
+    if synced and len(current_hashes) >= len(synced) and current_hashes[: len(synced)] == synced:
+        return len(synced)
+
+    previous_request = list(
+        getattr(sess, "last_request_message_hashes", None) or []
+    )
+    previous_response = getattr(sess, "last_response_message", None)
+    if (
+        previous_request
+        and isinstance(previous_response, dict)
+        and len(messages) > len(previous_request)
+        and current_hashes[: len(previous_request)] == previous_request
+    ):
+        assistant = messages[len(previous_request)]
+        if isinstance(assistant, dict) and str(assistant.get("role") or "").lower() == "assistant":
+            expected = _history_response_message(previous_response)
+            actual_text = _content_to_text(assistant.get("content"), [])
+            expected_text = _content_to_text(expected.get("content"), [])
+            actual_calls = assistant.get("tool_calls") or []
+            expected_calls = expected.get("tool_calls") or []
+            text_matches = actual_text == expected_text or (
+                bool(actual_text) and expected_text.startswith(actual_text)
+            )
+            if text_matches and _fingerprint(actual_calls) == _fingerprint(expected_calls):
+                return len(previous_request) + 1
+    return None
+
+
+def _incremental_prompt(messages: List[Dict], temporary_paths: List[str]) -> str:
+    """Serialize only messages appended since the last ACP user turn."""
+    parts: List[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        text = _content_to_text(msg.get("content"), temporary_paths)
+        call_lines: List[str] = []
+        for tc in msg.get("tool_calls") or []:
+            fn = (tc or {}).get("function") or {}
+            name = str(fn.get("name") or "").strip()
+            if name:
+                call_lines.append(f"[已调用工具] {name}({fn.get('arguments') or '{}'})")
+        if call_lines:
+            text = (f"{text}\n" if text else "") + "\n".join(call_lines)
+        if text:
+            parts.append(f"{_ROLE_LABELS.get(role, role or 'User')}: {text}")
+    return "[新增对话]\n" + ("\n\n".join(parts) if parts else "User: （无新内容）")
+
+
 # ---------------------------------------------------------------------------
 # CLI 进程
 # ---------------------------------------------------------------------------
@@ -792,18 +878,29 @@ class Handler(BaseHTTPRequestHandler):
 
         tools = payload.get("tools")
         use_acp = Config.acp_enabled and isinstance(tools, list) and bool(tools)
+        session_identity = str(
+            self.headers.get("X-HeySure-Session-ID", "") or payload.get("user") or ""
+        ).strip()
 
         prompt_preview = json.dumps(messages, ensure_ascii=False)
         try:
             if use_acp:
-                self._handle_acp_chat(model, messages, tools, stream, prompt_preview)
+                self._handle_acp_chat(
+                    model,
+                    messages,
+                    tools,
+                    stream,
+                    prompt_preview,
+                    session_identity,
+                    payload.get("tool_choice"),
+                )
             elif stream:
                 self._handle_stream(model, messages, prompt_preview)
             else:
                 self._handle_blocking(model, messages, prompt_preview)
         except (BrokenPipeError, ConnectionError):
             # 客户端断开：headless 路径由 run_cli_turn 的 finally 清理；
-            # ACP 路径在各自循环里已 cancel + drop。
+            # ACP 流式/阻塞路径会在写回失败时 cancel + drop。
             pass
 
     # -- MCP server（供 grok ACP 会话回连） ---------------------------------
@@ -993,11 +1090,20 @@ class Handler(BaseHTTPRequestHandler):
         tools: List[Dict],
         stream: bool,
         prompt_preview: str,
+        session_identity: str,
+        tool_choice: Any,
     ) -> None:
         os.makedirs(RUNTIME_DIR, exist_ok=True)
         tools_registry = acp_bridge.tools_registry_from_payload(tools)
         temp_paths: List[str] = []
         token, raw_results, tail_msgs = acp_bridge.extract_resume_info(messages)
+        current_hashes = _message_hashes(messages)
+        request_digest = _fingerprint({
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        })
 
         # 恢复路径：tool_call id 里的会话 token 命中且挂起调用齐全 → 作答续跑。
         sess = None
@@ -1007,6 +1113,11 @@ class Handler(BaseHTTPRequestHandler):
                 cand is not None
                 and not cand.closed
                 and (not model or cand.model == model)
+                and (
+                    not session_identity
+                    or not cand.conversation_identity
+                    or cand.conversation_identity == session_identity
+                )
                 and cand.busy.acquire(blocking=False)
             ):
                 results = {
@@ -1015,10 +1126,46 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 if cand.matches_results(results):
                     cand.update_tools(tools_registry)
+                    if session_identity and not cand.conversation_identity:
+                        ACP_REGISTRY.bind_identity(cand, session_identity)
                     cand.adopt_temp_paths(temp_paths)
                     cand.answer_calls(results, _serialize_tail(tail_msgs, temp_paths))
                     sess = cand
                 else:
+                    cand.busy.release()
+
+        # 跨用户轮次续接：HeySure 的稳定会话 ID 命中且历史是追加式，
+        # 则复用同一个 ACP session/prompt，只投喂新增消息。
+        if sess is None and session_identity:
+            cand = ACP_REGISTRY.get_by_identity(session_identity)
+            if cand is not None and not cand.closed and (not model or cand.model == model):
+                acquired = cand.busy.acquire(timeout=float(Config.timeout))
+                if acquired and not cand.closed:
+                    if (
+                        cand.last_request_digest == request_digest
+                        and isinstance(cand.last_response_message, dict)
+                        and cand.last_finish_reason
+                    ):
+                        try:
+                            self._send_cached_acp(
+                                cand, model, stream, prompt_preview
+                            )
+                        finally:
+                            cand.busy.release()
+                            ACP_REGISTRY.touch(cand)
+                        return
+                    resume_from = _resume_message_index(cand, messages)
+                    if resume_from is not None and resume_from < len(messages):
+                        temp_paths = []
+                        incremental = _incremental_prompt(messages[resume_from:], temp_paths)
+                        cand.update_tools(tools_registry)
+                        cand.adopt_temp_paths(temp_paths)
+                        cand.start_turn(incremental)
+                        sess = cand
+                    else:
+                        cand.busy.release()
+                        ACP_REGISTRY.drop(cand)
+                elif acquired:
                     cand.busy.release()
 
         # 新会话路径：首轮，或恢复失败（网关重启/会话过期/上下文被重写）→ 全量重放。
@@ -1043,13 +1190,19 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._handle_blocking(model, messages, prompt_preview)
                 return
+            if session_identity:
+                ACP_REGISTRY.bind_identity(sess, session_identity)
             sess.adopt_temp_paths(temp_paths)
             sess.start_turn(prompt_text)
 
+        request_state = {
+            "digest": request_digest,
+            "message_hashes": current_hashes,
+        }
         if stream:
-            self._acp_stream(sess, model, prompt_preview)
+            self._acp_stream(sess, model, prompt_preview, request_state)
         else:
-            self._acp_blocking(sess, model, prompt_preview)
+            self._acp_blocking(sess, model, prompt_preview, request_state)
 
     def _acp_pump(self, sess, on_text, on_thought):
         """消费会话事件直到本请求可以收尾。
@@ -1116,14 +1269,104 @@ class Handler(BaseHTTPRequestHandler):
         ]
 
     def _acp_park(self, sess) -> None:
-        """工具批次已上报：会话原地等待 HeySure 送回结果。"""
+        """会话原地等待工具结果或下一个用户轮次。"""
         ACP_REGISTRY.touch(sess)
         try:
             sess.busy.release()
         except RuntimeError:
             pass
 
-    def _acp_stream(self, sess, model: str, prompt_preview: str) -> None:
+    @staticmethod
+    def _remember_acp_response(
+        sess,
+        request_state: Dict[str, Any],
+        message: Dict[str, Any],
+        finish_reason: str,
+    ) -> None:
+        sess.last_request_digest = str(request_state.get("digest") or "")
+        sess.last_request_message_hashes = list(
+            request_state.get("message_hashes") or []
+        )
+        sess.last_response_message = copy.deepcopy(message)
+        sess.last_finish_reason = finish_reason
+        history_message = _history_response_message(message)
+        sess.synced_message_hashes = (
+            list(sess.last_request_message_hashes) + [_fingerprint(history_message)]
+        )
+
+    def _send_cached_acp(
+        self,
+        sess,
+        model: str,
+        stream: bool,
+        prompt_preview: str,
+    ) -> None:
+        """Replay the last completed response without invoking grok again."""
+        message = copy.deepcopy(sess.last_response_message or {
+            "role": "assistant", "content": ""
+        })
+        finish_reason = sess.last_finish_reason or "stop"
+        model_name = model or (Config.models[0] if Config.models else "grok")
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        usage = _usage(
+            prompt_preview,
+            str(message.get("content") or "") + str(message.get("reasoning_content") or ""),
+        )
+        if not stream:
+            self._json_response(200, {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model_name,
+                "system_fingerprint": GATEWAY_FINGERPRINT,
+                "cached": True,
+                "choices": [{
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }],
+                "usage": usage,
+            })
+            return
+
+        def chunk(delta: Dict[str, Any], finish: Optional[str] = None) -> bytes:
+            value: Dict[str, Any] = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "system_fingerprint": GATEWAY_FINGERPRINT,
+                "cached": True,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            if finish is not None:
+                value["usage"] = usage
+            return b"data: " + json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n\n"
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(chunk({"role": "assistant", "content": ""}))
+        if message.get("reasoning_content"):
+            self.wfile.write(chunk({"reasoning_content": message["reasoning_content"]}))
+        if message.get("content"):
+            self.wfile.write(chunk({"content": message["content"]}))
+        if message.get("tool_calls"):
+            self.wfile.write(chunk({"tool_calls": message["tool_calls"]}))
+        self.wfile.write(chunk({}, finish_reason))
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def _acp_stream(
+        self,
+        sess,
+        model: str,
+        prompt_preview: str,
+        request_state: Dict[str, Any],
+    ) -> None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         model_name = model or (Config.models[0] if Config.models else "grok")
@@ -1188,10 +1431,16 @@ class Handler(BaseHTTPRequestHandler):
             usage = _usage(prompt_preview, collected + reasoning_all)
 
             if outcome == "tools":
-                self.wfile.write(chunk({"tool_calls": self._tool_calls_payload(data)}))
+                tool_calls = self._tool_calls_payload(data)
+                self.wfile.write(chunk({"tool_calls": tool_calls}))
                 self.wfile.write(chunk({}, finish_reason="tool_calls", usage=usage))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
+                message: Dict[str, Any] = {"role": "assistant", "content": collected or None}
+                if reasoning_all:
+                    message["reasoning_content"] = reasoning_all
+                message["tool_calls"] = tool_calls
+                self._remember_acp_response(sess, request_state, message, "tool_calls")
                 self._acp_park(sess)
                 return
 
@@ -1201,13 +1450,26 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(chunk({}, finish_reason="stop", usage=usage))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
-            ACP_REGISTRY.drop(sess)
+            if outcome == "end" and sess.conversation_identity:
+                message = {"role": "assistant", "content": collected}
+                if reasoning_all:
+                    message["reasoning_content"] = reasoning_all
+                self._remember_acp_response(sess, request_state, message, "stop")
+                self._acp_park(sess)
+            else:
+                ACP_REGISTRY.drop(sess)
         except (BrokenPipeError, ConnectionError):
             sess.cancel_turn()
             ACP_REGISTRY.drop(sess)
             raise
 
-    def _acp_blocking(self, sess, model: str, prompt_preview: str) -> None:
+    def _acp_blocking(
+        self,
+        sess,
+        model: str,
+        prompt_preview: str,
+        request_state: Dict[str, Any],
+    ) -> None:
         text_parts: List[str] = []
         thought_parts: List[str] = []
         try:
@@ -1237,16 +1499,27 @@ class Handler(BaseHTTPRequestHandler):
         elif outcome == "error":
             message["content"] = f"{content}\n[grok-cli-gateway 错误] {data}".strip()
 
-        self._json_response(200, {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model or (Config.models[0] if Config.models else "grok"),
-            "system_fingerprint": GATEWAY_FINGERPRINT,
-            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "usage": _usage(prompt_preview, (message.get("content") or "") + reasoning),
-        })
+        try:
+            self._json_response(200, {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model or (Config.models[0] if Config.models else "grok"),
+                "system_fingerprint": GATEWAY_FINGERPRINT,
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+                "usage": _usage(prompt_preview, (message.get("content") or "") + reasoning),
+            })
+        except (BrokenPipeError, ConnectionError):
+            sess.cancel_turn()
+            ACP_REGISTRY.drop(sess)
+            raise
         if outcome == "tools":
+            self._remember_acp_response(
+                sess, request_state, message, "tool_calls"
+            )
+            self._acp_park(sess)
+        elif outcome == "end" and sess.conversation_identity:
+            self._remember_acp_response(sess, request_state, message, "stop")
             self._acp_park(sess)
         else:
             ACP_REGISTRY.drop(sess)

@@ -81,6 +81,15 @@ class AcpSession:
     def __init__(self, token: str, model: str):
         self.token = token
         self.model = model
+        # Optional stable identity supplied by the OpenAI client (HeySure sends
+        # X-HeySure-Session-ID).  A session with an identity may survive the end
+        # of one user turn and accept another session/prompt later.
+        self.conversation_identity = ""
+        self.synced_message_hashes: List[str] = []
+        self.last_request_message_hashes: List[str] = []
+        self.last_request_digest = ""
+        self.last_response_message: Optional[Dict[str, Any]] = None
+        self.last_finish_reason = ""
         self.queue: "Queue[tuple]" = Queue()
         self.tools: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self.pending: "OrderedDict[str, PendingToolCall]" = OrderedDict()
@@ -471,12 +480,13 @@ class AcpSession:
 
 
 class SessionRegistry:
-    """token → AcpSession，带 TTL 回收与容量上限（LRU 淘汰）。"""
+    """token / stable conversation identity → AcpSession, with TTL/LRU."""
 
     def __init__(self, ttl: float = 1800.0, max_sessions: int = 6):
         self.ttl = ttl
         self.max_sessions = max_sessions
         self._sessions: "OrderedDict[str, AcpSession]" = OrderedDict()
+        self._identities: Dict[str, AcpSession] = {}
         self._lock = threading.Lock()
         self._gc_started = False
 
@@ -488,6 +498,35 @@ class SessionRegistry:
         with self._lock:
             return self._sessions.get(token)
 
+    def get_by_identity(self, identity: str) -> Optional[AcpSession]:
+        if not identity:
+            return None
+        with self._lock:
+            sess = self._identities.get(identity)
+            if sess is not None and sess.token not in self._sessions:
+                self._identities.pop(identity, None)
+                return None
+            return sess
+
+    def bind_identity(self, sess: AcpSession, identity: str) -> None:
+        """Bind a stable client identity, replacing any older live session."""
+        identity = str(identity or "").strip()
+        if not identity:
+            return
+        replaced: Optional[AcpSession] = None
+        with self._lock:
+            current = self._identities.get(identity)
+            if current is not None and current is not sess:
+                replaced = current
+                self._sessions.pop(current.token, None)
+            if sess.conversation_identity and sess.conversation_identity != identity:
+                if self._identities.get(sess.conversation_identity) is sess:
+                    self._identities.pop(sess.conversation_identity, None)
+            sess.conversation_identity = identity
+            self._identities[identity] = sess
+        if replaced is not None:
+            replaced.close()
+
     def add(self, sess: AcpSession) -> None:
         evicted: List[AcpSession] = []
         with self._lock:
@@ -495,6 +534,11 @@ class SessionRegistry:
             self._sessions.move_to_end(sess.token)
             while len(self._sessions) > self.max_sessions:
                 _, old = self._sessions.popitem(last=False)
+                if (
+                    old.conversation_identity
+                    and self._identities.get(old.conversation_identity) is old
+                ):
+                    self._identities.pop(old.conversation_identity, None)
                 evicted.append(old)
         for old in evicted:
             old.close()
@@ -503,6 +547,11 @@ class SessionRegistry:
     def drop(self, sess: AcpSession) -> None:
         with self._lock:
             self._sessions.pop(sess.token, None)
+            if (
+                sess.conversation_identity
+                and self._identities.get(sess.conversation_identity) is sess
+            ):
+                self._identities.pop(sess.conversation_identity, None)
         sess.close()
 
     def touch(self, sess: AcpSession) -> None:
@@ -531,6 +580,11 @@ class SessionRegistry:
                 for token, sess in list(self._sessions.items()):
                     if now - sess.last_used > self.ttl or sess.closed:
                         self._sessions.pop(token, None)
+                        if (
+                            sess.conversation_identity
+                            and self._identities.get(sess.conversation_identity) is sess
+                        ):
+                            self._identities.pop(sess.conversation_identity, None)
                         stale.append(sess)
             for sess in stale:
                 sess.close()
