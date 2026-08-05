@@ -41,6 +41,20 @@ chmod +x run.sh
 ./run.sh stop
 ```
 
+### 开机自启（systemd）
+
+```bash
+./run.sh autostart on       # 创建并启用 systemd 服务，同时立即启动
+./run.sh autostart status   # 查看是否启用及当前服务状态
+./run.sh autostart off      # 取消开机自启，不停止当前服务
+./run.sh stop               # 如需同时停止当前服务
+```
+
+也可以直接运行 `./run.sh`，在交互菜单中选择“开机自启”。启用后，原有的
+`start`、`stop`、`restart`、`status` 和 `logs` 会自动改为管理
+`grok-cli-gateway.service`，不会重复启动另一份网关进程。配置过程需要 root
+权限；非 root 用户会通过 `sudo` 执行 systemd 操作。
+
 ### 系统代理（服务器出网）
 
 装 CLI、登录、推理（`grok` 子进程）都会继承代理环境变量。配置写入 `.env.proxy`，`start` / `install-cli` 自动加载。

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# grok_cli 服务器管理脚本（Linux）
+# codex_cli 服务器管理脚本（Linux）
 #
 # 用法：
 #   chmod +x run.sh
 #   ./run.sh                 # 交互菜单
 #   ./run.sh deps            # 安装系统依赖（python3 / curl 等）
-#   ./run.sh install-cli     # 安装 / 更新 grok CLI
+#   ./run.sh install-cli     # 安装 / 更新 Codex CLI
 #   ./run.sh login           # 检查登录；未登录则引导登录
 #   ./run.sh expose on|off   # 对外开放（0.0.0.0 + 网关密钥）/ 收回本机
 #   ./run.sh autostart on|off|status  # systemd 开机自启
@@ -13,18 +13,18 @@
 #   ./run.sh fg              # 前台启动（调试用）
 #
 # 环境变量（可选，与 server.py 一致）：
-#   GROK_CLI_COMMAND  CLI 路径（默认自动探测 ~/.grok/bin/grok 或 PATH 中的 grok）
-#   GROK_CLI_HOST     默认 127.0.0.1；对外暴露可设 0.0.0.0
-#   GROK_CLI_PORT     默认 8100
-#   GROK_CLI_TIMEOUT  默认 600
-#   GROK_CLI_API_KEY  网关鉴权（可选）
-#   GROK_CLI_MODELS   默认 grok-4.5
-#   XAI_API_KEY       无浏览器环境可用 API Key 登录 grok CLI
+#   CODEX_CLI_COMMAND  CLI 路径（默认自动探测 ~/.codex/bin/codex 或 PATH 中的 codex）
+#   CODEX_CLI_HOST     默认 127.0.0.1；对外暴露可设 0.0.0.0
+#   CODEX_CLI_PORT     默认 8120
+#   CODEX_CLI_TIMEOUT  默认 900
+#   CODEX_CLI_API_KEY  网关鉴权（可选）
+#   CODEX_CLI_MODELS   可选人工覆盖；默认由 codex debug models 动态发现
+#   OPENAI_API_KEY     可选；仅供 ./run.sh login 的 API Key 登录方式读取
 #   PYTHON            python 解释器，默认 python3
 #   代理（也可 ./run.sh proxy 交互配置，写入 .env.proxy）：
-#   GROK_CLI_PROXY_HOST / GROK_CLI_PROXY_PORT / GROK_CLI_PROXY_SCHEME
-#   GROK_CLI_PROXY_URL  完整代理地址，如 http://127.0.0.1:7890
-#   GROK_CLI_PROXY_USER / GROK_CLI_PROXY_PASS  可选认证
+#   CODEX_CLI_PROXY_HOST / CODEX_CLI_PROXY_PORT / CODEX_CLI_PROXY_SCHEME
+#   CODEX_CLI_PROXY_URL  完整代理地址，如 http://127.0.0.1:7890
+#   CODEX_CLI_PROXY_USER / CODEX_CLI_PROXY_PASS  可选认证
 
 set -euo pipefail
 
@@ -37,15 +37,15 @@ LOG_FILE="${RUNTIME_DIR}/gateway.log"
 PROXY_ENV_FILE="${ROOT}/.env.proxy"
 ENV_FILE="${ROOT}/.env"
 PYTHON="${PYTHON:-python3}"
-SYSTEMD_UNIT_NAME="grok-cli-gateway.service"
+SYSTEMD_UNIT_NAME="codex-cli-gateway.service"
 SYSTEMD_UNIT_FILE="/etc/systemd/system/${SYSTEMD_UNIT_NAME}"
 
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
 
-log()  { printf '[grok_cli] %s\n' "$*"; }
-err()  { printf '[grok_cli] ERROR: %s\n' "$*" >&2; }
+log()  { printf '[codex_cli] %s\n' "$*"; }
+err()  { printf '[codex_cli] ERROR: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
 need_cmd() {
@@ -56,23 +56,23 @@ ensure_runtime() {
   mkdir -p "$RUNTIME_DIR"
 }
 
-# 解析 grok CLI 可执行路径（写入 GROK_CLI_COMMAND 若未设置）
-resolve_grok() {
-  if [[ -n "${GROK_CLI_COMMAND:-}" ]]; then
+# 解析 Codex CLI 可执行路径（写入 CODEX_CLI_COMMAND 若未设置）
+resolve_codex() {
+  if [[ -n "${CODEX_CLI_COMMAND:-}" ]]; then
     # 允许 "path with spaces" 或完整路径
     local first
-    first="$(printf '%s' "$GROK_CLI_COMMAND" | awk '{print $1}')"
+    first="$(printf '%s' "$CODEX_CLI_COMMAND" | awk '{print $1}')"
     if [[ -x "$first" ]] || need_cmd "$first" || [[ -f "$first" ]]; then
-      printf '%s' "$GROK_CLI_COMMAND"
+      printf '%s' "$CODEX_CLI_COMMAND"
       return 0
     fi
   fi
 
   local candidates=(
-    "${HOME}/.grok/bin/grok"
-    "${HOME}/.local/bin/grok"
-    "/usr/local/bin/grok"
-    "/usr/bin/grok"
+    "${HOME}/.codex/bin/codex"
+    "${HOME}/.local/bin/codex"
+    "/usr/local/bin/codex"
+    "/usr/bin/codex"
   )
   local p
   for p in "${candidates[@]}"; do
@@ -81,21 +81,21 @@ resolve_grok() {
       return 0
     fi
   done
-  if need_cmd grok; then
-    command -v grok
+  if need_cmd codex; then
+    command -v codex
     return 0
   fi
   return 1
 }
 
 export_defaults() {
-  export GROK_CLI_HOST="${GROK_CLI_HOST:-127.0.0.1}"
-  export GROK_CLI_PORT="${GROK_CLI_PORT:-8100}"
-  export GROK_CLI_TIMEOUT="${GROK_CLI_TIMEOUT:-600}"
-  export GROK_CLI_MODELS="${GROK_CLI_MODELS:-grok-4.5}"
-  if [[ -z "${GROK_CLI_COMMAND:-}" ]]; then
-    if cmd="$(resolve_grok 2>/dev/null)"; then
-      export GROK_CLI_COMMAND="$cmd"
+  export CODEX_CLI_HOST="${CODEX_CLI_HOST:-127.0.0.1}"
+  export CODEX_CLI_PORT="${CODEX_CLI_PORT:-8120}"
+  export CODEX_CLI_TIMEOUT="${CODEX_CLI_TIMEOUT:-900}"
+  export CODEX_CLI_MODELS="${CODEX_CLI_MODELS:-}"
+  if [[ -z "${CODEX_CLI_COMMAND:-}" ]]; then
+    if cmd="$(resolve_codex 2>/dev/null)"; then
+      export CODEX_CLI_COMMAND="$cmd"
     fi
   fi
   # 根据 host/port 或完整 URL 导出标准代理环境变量
@@ -108,7 +108,7 @@ export_defaults() {
 
 # 从环境变量拼出代理 URL；无配置则返回 1
 build_proxy_url() {
-  local url="${GROK_CLI_PROXY_URL:-}"
+  local url="${CODEX_CLI_PROXY_URL:-}"
   if [[ -n "$url" ]]; then
     # 补全 scheme
     if [[ "$url" != *"://"* ]]; then
@@ -118,11 +118,11 @@ build_proxy_url() {
     return 0
   fi
 
-  local host="${GROK_CLI_PROXY_HOST:-}"
-  local port="${GROK_CLI_PROXY_PORT:-}"
-  local scheme="${GROK_CLI_PROXY_SCHEME:-http}"
-  local user="${GROK_CLI_PROXY_USER:-}"
-  local pass="${GROK_CLI_PROXY_PASS:-}"
+  local host="${CODEX_CLI_PROXY_HOST:-}"
+  local port="${CODEX_CLI_PROXY_PORT:-}"
+  local scheme="${CODEX_CLI_PROXY_SCHEME:-http}"
+  local user="${CODEX_CLI_PROXY_USER:-}"
+  local pass="${CODEX_CLI_PROXY_PASS:-}"
 
   [[ -n "$host" ]] || return 1
   [[ -n "$port" ]] || return 1
@@ -150,12 +150,12 @@ build_proxy_url() {
 clear_proxy_env_vars() {
   unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
     NO_PROXY no_proxy \
-    GROK_CLI_PROXY_URL GROK_CLI_PROXY_HOST GROK_CLI_PROXY_PORT \
-    GROK_CLI_PROXY_SCHEME GROK_CLI_PROXY_USER GROK_CLI_PROXY_PASS \
+    CODEX_CLI_PROXY_URL CODEX_CLI_PROXY_HOST CODEX_CLI_PROXY_PORT \
+    CODEX_CLI_PROXY_SCHEME CODEX_CLI_PROXY_USER CODEX_CLI_PROXY_PASS \
     2>/dev/null || true
 }
 
-# 将配置导出为进程环境（curl / python / grok 子进程会继承）
+# 将配置导出为进程环境（curl / python / codex 子进程会继承）
 apply_proxy_env() {
   local url=""
   if ! url="$(build_proxy_url 2>/dev/null)"; then
@@ -163,7 +163,7 @@ apply_proxy_env() {
   fi
   [[ -n "$url" ]] || return 0
 
-  export GROK_CLI_PROXY_URL="$url"
+  export CODEX_CLI_PROXY_URL="$url"
   export http_proxy="$url"
   export https_proxy="$url"
   export HTTP_PROXY="$url"
@@ -171,9 +171,9 @@ apply_proxy_env() {
   export all_proxy="$url"
   export ALL_PROXY="$url"
 
-  local nop="localhost,127.0.0.1,::1,${GROK_CLI_HOST:-127.0.0.1}"
-  if [[ -n "${GROK_CLI_NO_PROXY:-}" ]]; then
-    nop="${GROK_CLI_NO_PROXY}"
+  local nop="localhost,127.0.0.1,::1,${CODEX_CLI_HOST:-127.0.0.1}"
+  if [[ -n "${CODEX_CLI_NO_PROXY:-}" ]]; then
+    nop="${CODEX_CLI_NO_PROXY}"
   fi
   export no_proxy="$nop"
   export NO_PROXY="$nop"
@@ -192,35 +192,35 @@ proxy_display() {
 }
 
 save_proxy_file() {
-  local host="${GROK_CLI_PROXY_HOST:-}"
-  local port="${GROK_CLI_PROXY_PORT:-}"
-  local scheme="${GROK_CLI_PROXY_SCHEME:-http}"
-  local user="${GROK_CLI_PROXY_USER:-}"
-  local pass="${GROK_CLI_PROXY_PASS:-}"
-  local url="${GROK_CLI_PROXY_URL:-}"
-  local nop="${GROK_CLI_NO_PROXY:-localhost,127.0.0.1,::1}"
+  local host="${CODEX_CLI_PROXY_HOST:-}"
+  local port="${CODEX_CLI_PROXY_PORT:-}"
+  local scheme="${CODEX_CLI_PROXY_SCHEME:-http}"
+  local user="${CODEX_CLI_PROXY_USER:-}"
+  local pass="${CODEX_CLI_PROXY_PASS:-}"
+  local url="${CODEX_CLI_PROXY_URL:-}"
+  local nop="${CODEX_CLI_NO_PROXY:-localhost,127.0.0.1,::1}"
 
   umask 077
   {
-    echo "# grok_cli 代理配置 — 由 ./run.sh proxy 生成，start/install-cli 会自动加载"
+    echo "# codex_cli 代理配置 — 由 ./run.sh proxy 生成，start/install-cli 会自动加载"
     echo "# 也可手动 export 后启动；本文件优先于空环境"
     if [[ -n "$url" ]]; then
-      printf 'export GROK_CLI_PROXY_URL=%q\n' "$url"
+      printf 'export CODEX_CLI_PROXY_URL=%q\n' "$url"
     fi
     if [[ -n "$host" ]]; then
-      printf 'export GROK_CLI_PROXY_HOST=%q\n' "$host"
+      printf 'export CODEX_CLI_PROXY_HOST=%q\n' "$host"
     fi
     if [[ -n "$port" ]]; then
-      printf 'export GROK_CLI_PROXY_PORT=%q\n' "$port"
+      printf 'export CODEX_CLI_PROXY_PORT=%q\n' "$port"
     fi
-    printf 'export GROK_CLI_PROXY_SCHEME=%q\n' "$scheme"
+    printf 'export CODEX_CLI_PROXY_SCHEME=%q\n' "$scheme"
     if [[ -n "$user" ]]; then
-      printf 'export GROK_CLI_PROXY_USER=%q\n' "$user"
+      printf 'export CODEX_CLI_PROXY_USER=%q\n' "$user"
     fi
     if [[ -n "$pass" ]]; then
-      printf 'export GROK_CLI_PROXY_PASS=%q\n' "$pass"
+      printf 'export CODEX_CLI_PROXY_PASS=%q\n' "$pass"
     fi
-    printf 'export GROK_CLI_NO_PROXY=%q\n' "$nop"
+    printf 'export CODEX_CLI_NO_PROXY=%q\n' "$nop"
   } > "$PROXY_ENV_FILE"
   chmod 600 "$PROXY_ENV_FILE"
 
@@ -229,7 +229,7 @@ save_proxy_file() {
   if url="$(build_proxy_url 2>/dev/null)"; then
     {
       echo ""
-      echo "# 标准代理环境变量（供 curl / grok / python urllib 使用）"
+      echo "# 标准代理环境变量（供 curl / codex / python urllib 使用）"
       printf 'export http_proxy=%q\n' "$url"
       printf 'export https_proxy=%q\n' "$url"
       printf 'export HTTP_PROXY=%q\n' "$url"
@@ -253,12 +253,12 @@ proxy_show() {
   else
     echo "文件     : (无 .env.proxy)"
   fi
-  echo "HOST     : ${GROK_CLI_PROXY_HOST:-(空)}"
-  echo "PORT     : ${GROK_CLI_PROXY_PORT:-(空)}"
-  echo "SCHEME   : ${GROK_CLI_PROXY_SCHEME:-http}"
-  echo "USER     : ${GROK_CLI_PROXY_USER:-(无)}"
+  echo "HOST     : ${CODEX_CLI_PROXY_HOST:-(空)}"
+  echo "PORT     : ${CODEX_CLI_PROXY_PORT:-(空)}"
+  echo "SCHEME   : ${CODEX_CLI_PROXY_SCHEME:-http}"
+  echo "USER     : ${CODEX_CLI_PROXY_USER:-(无)}"
   echo "URL      : $(proxy_display)"
-  echo "NO_PROXY : ${NO_PROXY:-${GROK_CLI_NO_PROXY:-localhost,127.0.0.1,::1}}"
+  echo "NO_PROXY : ${NO_PROXY:-${CODEX_CLI_NO_PROXY:-localhost,127.0.0.1,::1}}"
   echo "------------------"
 }
 
@@ -283,15 +283,15 @@ proxy_test() {
   log "使用代理 $(proxy_display) 探测外网..."
   # 不走代理测本机；走代理测公共 HTTPS
   if curl -fsS --max-time 15 -o /dev/null -w "HTTP %{http_code}  time %{time_total}s\n" \
-      https://api.x.ai/ 2>/dev/null \
+      https://api.openai.com/ 2>/dev/null \
     || curl -fsS --max-time 15 -o /dev/null -w "HTTP %{http_code}  time %{time_total}s\n" \
-      https://x.ai/ 2>/dev/null \
+      https://chatgpt.com/ 2>/dev/null \
     || curl -fsS --max-time 15 -o /dev/null -w "HTTP %{http_code}  time %{time_total}s\n" \
       https://www.google.com/generate_204 2>/dev/null; then
     log "代理连通性：OK"
   else
     err "代理探测失败。请检查网址/端口、协议(http/socks5)、账号密码与防火墙。"
-    err "可手动：curl -x $(proxy_display) -I https://x.ai/"
+    err "可手动：curl -x $(proxy_display) -I https://chatgpt.com/"
     exit 1
   fi
 }
@@ -304,50 +304,50 @@ parse_proxy_input() {
 
   # 已是完整 URL
   if [[ "$raw" == *"://"* ]]; then
-    export GROK_CLI_PROXY_URL="$raw"
+    export CODEX_CLI_PROXY_URL="$raw"
     # 尽量拆 host/port 便于展示
     local rest scheme
     scheme="${raw%%://*}"
     rest="${raw#*://}"
-    export GROK_CLI_PROXY_SCHEME="$scheme"
+    export CODEX_CLI_PROXY_SCHEME="$scheme"
     # 去掉 userinfo
     if [[ "$rest" == *"@"* ]]; then
       local userinfo
       userinfo="${rest%%@*}"
       rest="${rest#*@}"
       if [[ "$userinfo" == *":"* ]]; then
-        export GROK_CLI_PROXY_USER="${userinfo%%:*}"
-        export GROK_CLI_PROXY_PASS="${userinfo#*:}"
+        export CODEX_CLI_PROXY_USER="${userinfo%%:*}"
+        export CODEX_CLI_PROXY_PASS="${userinfo#*:}"
       else
-        export GROK_CLI_PROXY_USER="$userinfo"
+        export CODEX_CLI_PROXY_USER="$userinfo"
       fi
     fi
     # 去掉 path
     rest="${rest%%/*}"
     if [[ "$rest" == *"]:"* ]]; then
       # [ipv6]:port
-      export GROK_CLI_PROXY_HOST="${rest%:*}"
-      export GROK_CLI_PROXY_PORT="${rest##*:}"
+      export CODEX_CLI_PROXY_HOST="${rest%:*}"
+      export CODEX_CLI_PROXY_PORT="${rest##*:}"
     elif [[ "$rest" == *":"* ]]; then
-      export GROK_CLI_PROXY_HOST="${rest%:*}"
-      export GROK_CLI_PROXY_PORT="${rest##*:}"
+      export CODEX_CLI_PROXY_HOST="${rest%:*}"
+      export CODEX_CLI_PROXY_PORT="${rest##*:}"
     else
-      export GROK_CLI_PROXY_HOST="$rest"
+      export CODEX_CLI_PROXY_HOST="$rest"
     fi
     return 0
   fi
 
   # host:port
   if [[ "$raw" == *":"* ]]; then
-    export GROK_CLI_PROXY_HOST="${raw%:*}"
-    export GROK_CLI_PROXY_PORT="${raw##*:}"
-    unset GROK_CLI_PROXY_URL 2>/dev/null || true
+    export CODEX_CLI_PROXY_HOST="${raw%:*}"
+    export CODEX_CLI_PROXY_PORT="${raw##*:}"
+    unset CODEX_CLI_PROXY_URL 2>/dev/null || true
     return 0
   fi
 
   # 仅 host
-  export GROK_CLI_PROXY_HOST="$raw"
-  unset GROK_CLI_PROXY_URL 2>/dev/null || true
+  export CODEX_CLI_PROXY_HOST="$raw"
+  unset CODEX_CLI_PROXY_URL 2>/dev/null || true
   return 0
 }
 
@@ -368,10 +368,10 @@ proxy_set_from_args() {
         # 位置参数：host:port 或 url
         if [[ -z "$url" && -z "$host" ]]; then
           parse_proxy_input "$1" || true
-          host="${GROK_CLI_PROXY_HOST:-$host}"
-          port="${GROK_CLI_PROXY_PORT:-$port}"
-          url="${GROK_CLI_PROXY_URL:-$url}"
-          scheme="${GROK_CLI_PROXY_SCHEME:-$scheme}"
+          host="${CODEX_CLI_PROXY_HOST:-$host}"
+          port="${CODEX_CLI_PROXY_PORT:-$port}"
+          url="${CODEX_CLI_PROXY_URL:-$url}"
+          scheme="${CODEX_CLI_PROXY_SCHEME:-$scheme}"
         fi
         shift
         ;;
@@ -383,22 +383,22 @@ proxy_set_from_args() {
   else
     [[ -n "$host" ]] || die "请指定 --host 与 --port，或 --url / host:port"
     [[ -n "$port" ]] || die "请指定 --port（代理端口）"
-    export GROK_CLI_PROXY_HOST="$host"
-    export GROK_CLI_PROXY_PORT="$port"
-    export GROK_CLI_PROXY_SCHEME="${scheme:-http}"
-    unset GROK_CLI_PROXY_URL 2>/dev/null || true
+    export CODEX_CLI_PROXY_HOST="$host"
+    export CODEX_CLI_PROXY_PORT="$port"
+    export CODEX_CLI_PROXY_SCHEME="${scheme:-http}"
+    unset CODEX_CLI_PROXY_URL 2>/dev/null || true
   fi
   if [[ -n "$user" ]]; then
-    export GROK_CLI_PROXY_USER="$user"
+    export CODEX_CLI_PROXY_USER="$user"
   fi
   if [[ -n "$pass" ]]; then
-    export GROK_CLI_PROXY_PASS="$pass"
+    export CODEX_CLI_PROXY_PASS="$pass"
   fi
   if [[ -n "$nop" ]]; then
-    export GROK_CLI_NO_PROXY="$nop"
+    export CODEX_CLI_NO_PROXY="$nop"
   fi
   # 校验端口
-  port="${GROK_CLI_PROXY_PORT:-}"
+  port="${CODEX_CLI_PROXY_PORT:-}"
   if [[ -n "$port" ]]; then
     if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
       die "无效端口：$port（应为 1-65535）"
@@ -450,12 +450,12 @@ proxy_interactive() {
         fi
       fi
       clear_proxy_env_vars
-      export GROK_CLI_PROXY_HOST="$host"
-      export GROK_CLI_PROXY_PORT="$port"
-      export GROK_CLI_PROXY_SCHEME="$scheme"
-      [[ -n "$user" ]] && export GROK_CLI_PROXY_USER="$user"
-      [[ -n "${pass:-}" ]] && export GROK_CLI_PROXY_PASS="$pass"
-      unset GROK_CLI_PROXY_URL 2>/dev/null || true
+      export CODEX_CLI_PROXY_HOST="$host"
+      export CODEX_CLI_PROXY_PORT="$port"
+      export CODEX_CLI_PROXY_SCHEME="$scheme"
+      [[ -n "$user" ]] && export CODEX_CLI_PROXY_USER="$user"
+      [[ -n "${pass:-}" ]] && export CODEX_CLI_PROXY_PASS="$pass"
+      unset CODEX_CLI_PROXY_URL 2>/dev/null || true
       save_proxy_file
       echo -n "是否立刻测试连通性？[Y/n] > "
       local t
@@ -601,14 +601,15 @@ as_root() {
 # ---------------------------------------------------------------------------
 
 cmd_deps() {
-  log "检查 / 安装系统依赖（python3、curl、ca-certificates）..."
+  log "检查 / 安装系统依赖（python3、curl、Node.js/npm、ca-certificates）..."
 
   local missing=()
   need_cmd "$PYTHON" || missing+=("python3")
   need_cmd curl || missing+=("curl")
+  need_cmd npm || missing+=("nodejs/npm")
 
   if ((${#missing[@]} == 0)); then
-    log "已满足：$(command -v "$PYTHON")、$(command -v curl)"
+    log "已满足：$(command -v "$PYTHON")、$(command -v curl)、$(command -v npm)"
     "$PYTHON" -c 'import sys; print("Python", sys.version.split()[0])'
     # 验证标准库 http.server 可用
     "$PYTHON" -c 'import http.server, json, urllib.request' \
@@ -621,15 +622,15 @@ cmd_deps() {
   if [[ "$(id -u)" -ne 0 ]]; then
     err "需要 root 安装系统包，请执行："
     if need_cmd apt-get; then
-      err "  sudo apt-get update && sudo apt-get install -y python3 curl ca-certificates"
+      err "  sudo apt-get update && sudo apt-get install -y python3 curl ca-certificates nodejs npm"
     elif need_cmd dnf; then
-      err "  sudo dnf install -y python3 curl ca-certificates"
+      err "  sudo dnf install -y python3 curl ca-certificates nodejs npm"
     elif need_cmd yum; then
-      err "  sudo yum install -y python3 curl ca-certificates"
+      err "  sudo yum install -y python3 curl ca-certificates nodejs npm"
     elif need_cmd apk; then
-      err "  sudo apk add python3 curl ca-certificates"
+      err "  sudo apk add python3 curl ca-certificates nodejs npm"
     else
-      err "  请手动安装：python3 curl ca-certificates"
+      err "  请手动安装：python3 curl ca-certificates nodejs npm"
     fi
     err "或：sudo $0 deps"
     exit 1
@@ -638,51 +639,43 @@ cmd_deps() {
   if need_cmd apt-get; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y python3 curl ca-certificates
+    apt-get install -y python3 curl ca-certificates nodejs npm
   elif need_cmd dnf; then
-    dnf install -y python3 curl ca-certificates
+    dnf install -y python3 curl ca-certificates nodejs npm
   elif need_cmd yum; then
-    yum install -y python3 curl ca-certificates
+    yum install -y python3 curl ca-certificates nodejs npm
   elif need_cmd apk; then
-    apk add --no-cache python3 curl ca-certificates
+    apk add --no-cache python3 curl ca-certificates nodejs npm
   else
-    die "无法识别包管理器，请手动安装 python3 与 curl"
+    die "无法识别包管理器，请手动安装 python3、curl、Node.js/npm"
   fi
 
   need_cmd "$PYTHON" || die "安装后仍找不到 $PYTHON"
   need_cmd curl || die "安装后仍找不到 curl"
+  need_cmd npm || die "安装后仍找不到 npm"
   log "系统依赖安装完成"
 }
 
 # ---------------------------------------------------------------------------
-# install-cli — 安装 / 更新官方 grok CLI
+# install-cli — 安装 / 更新官方 Codex CLI
 # ---------------------------------------------------------------------------
 
 cmd_install_cli() {
   load_optional_env
-  need_cmd curl || die "需要 curl，请先执行：$0 deps"
+  need_cmd npm || die "需要 Node.js/npm，请先执行：$0 deps"
   if build_proxy_url >/dev/null 2>&1; then
     log "安装将走代理：$(proxy_display)"
   fi
-  log "安装 / 更新 grok CLI（官方脚本：https://x.ai/cli/install.sh）..."
-  curl -fsSL https://x.ai/cli/install.sh | bash
+  log "通过 npm 安装 / 更新官方 Codex CLI（@openai/codex）..."
+  npm install -g @openai/codex
 
-  # 安装脚本通常装到 ~/.grok/bin/grok，可能未进 PATH
-  local bin="${HOME}/.grok/bin"
-  if [[ -d "$bin" ]]; then
-    case ":${PATH}:" in
-      *":${bin}:"*) ;;
-      *) export PATH="${bin}:${PATH}" ;;
-    esac
-  fi
-
-  if cmd="$(resolve_grok 2>/dev/null)"; then
-    export GROK_CLI_COMMAND="$cmd"
-    log "grok CLI 已就绪：$cmd"
+  if cmd="$(resolve_codex 2>/dev/null)"; then
+    export CODEX_CLI_COMMAND="$cmd"
+    log "Codex CLI 已就绪：$cmd"
     "$cmd" --version 2>/dev/null || "$cmd" -v 2>/dev/null || true
   else
-    err "安装脚本已执行，但未在常见路径找到 grok。"
-    err "请确认安装输出，或手动设置：export GROK_CLI_COMMAND=/path/to/grok"
+    err "npm 安装已执行，但未在 PATH 或常见路径找到 codex。"
+    err "请确认安装输出，或手动设置：export CODEX_CLI_COMMAND=/path/to/codex"
     exit 1
   fi
 }
@@ -694,9 +687,8 @@ cmd_install_cli() {
 auth_file_present() {
   local f
   for f in \
-    "${HOME}/.grok/auth.json" \
-    "${HOME}/.grok/credentials.json" \
-    "${HOME}/.config/grok/auth.json"
+    "${HOME}/.codex/auth.json" \
+    "${CODEX_HOME:-${HOME}/.codex}/auth.json"
   do
     if [[ -f "$f" ]] && [[ -s "$f" ]]; then
       printf '%s' "$f"
@@ -708,99 +700,71 @@ auth_file_present() {
 
 # 返回 0 = 已登录 / 有可用凭证
 is_logged_in() {
-  if [[ -n "${XAI_API_KEY:-}" ]]; then
-    return 0
+  local codex=""
+  if codex="$(resolve_codex 2>/dev/null)"; then
+    "$codex" login status >/dev/null 2>&1 && return 0
   fi
-  if auth_file_present >/dev/null; then
-    return 0
-  fi
-  return 1
+  auth_file_present >/dev/null
 }
 
 # 轻量探测：headless 发一句极短 prompt；失败不致命
 probe_cli_auth() {
-  local grok="$1"
-  # 部分版本支持 auth status / whoami
-  if "$grok" auth status >/dev/null 2>&1; then
-    return 0
-  fi
-  if "$grok" whoami >/dev/null 2>&1; then
-    return 0
-  fi
-  # 不主动烧额度做真实推理探测，仅看凭证文件 / 环境变量
-  is_logged_in
+  local codex="$1"
+  "$codex" login status >/dev/null 2>&1
 }
 
 cmd_login() {
   load_optional_env
   export_defaults
 
-  local grok=""
-  if ! grok="$(resolve_grok 2>/dev/null)"; then
-    err "未找到 grok CLI。"
+  local codex=""
+  if ! codex="$(resolve_codex 2>/dev/null)"; then
+    err "未找到 Codex CLI。"
     err "请先执行：$0 install-cli"
     exit 1
   fi
-  export GROK_CLI_COMMAND="$grok"
-  log "CLI：$grok"
+  export CODEX_CLI_COMMAND="$codex"
+  log "CLI：$codex"
 
-  if is_logged_in; then
-    local authf=""
-    authf="$(auth_file_present 2>/dev/null || true)"
-    if [[ -n "${XAI_API_KEY:-}" ]]; then
-      log "已检测到环境变量 XAI_API_KEY（无浏览器环境可用）"
-    fi
-    if [[ -n "$authf" ]]; then
-      log "已检测到登录凭证：$authf"
-    fi
-    if probe_cli_auth "$grok"; then
-      log "登录状态：OK"
-      return 0
-    fi
-    log "凭证文件/环境变量存在，但 CLI 状态命令未确认；如请求失败请重新登录。"
+  if probe_cli_auth "$codex"; then
+    log "登录状态：OK"
+    "$codex" login status || true
     return 0
   fi
 
   log "未检测到登录凭证。"
   echo
-  # 无 DISPLAY / Wayland 基本就是无 GUI 服务器
   local headless=0
   if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
     headless=1
-  fi
-
-  if ((headless)); then
-    echo "检测到无 GUI（无 DISPLAY）。"
-    echo "想「真正登录」订阅账号时：在有浏览器的电脑 grok login，再把 auth.json 拷过来。"
+    echo "检测到当前是无 GUI / SSH 环境，推荐选择 1（device auth）。"
     echo
   fi
-
   echo "可选登录方式："
-  echo "  1) ★ 订阅登录：本机浏览器登录后，把凭证拷到服务器（你想登录时用这个）"
-  echo "  2) 在本服务器跑 grok login（无 GUI 会尽量把登录 URL 打到终端）"
-  echo "  3) API Key（按量计费兜底，不是订阅 OAuth）"
+  echo "  1) ★ Device Auth（无 GUI 服务器推荐，会显示网址和一次性代码）"
+  echo "  2) ChatGPT 浏览器 OAuth（仅 GUI 或已配置 SSH 端口转发）"
+  echo "  3) 从本机拷贝 ~/.codex/auth.json"
+  echo "  4) OpenAI API Key（按量计费）"
   echo "  q) 退出"
   echo
 
   # 非交互环境：只提示
   if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
-    err "当前为非交互终端。订阅登录请："
-    err "  有浏览器的电脑：grok login"
-    err "  scp ~/.grok/auth.json 到服务器 ~/.grok/auth.json"
-    err "  再执行：$0 login"
+    err "当前为非交互终端。请在 SSH 交互终端运行 $0 login，或直接运行 codex login --device-auth。"
     exit 1
   fi
 
   local default_choice="1"
-  echo -n "选择 [1=拷贝凭证登录 / 2=本机 grok login / 3=API Key / q=退出]（默认 ${default_choice}）> "
+  echo -n "选择 [1=device auth / 2=浏览器 OAuth / 3=拷贝凭证 / 4=API Key / q=退出]（默认 ${default_choice}）> "
   local choice
   read -r choice
   choice="${choice:-$default_choice}"
 
   case "$choice" in
-    1) login_copy_auth_guide ;;
-    2) login_run_grok_login "$grok" "$headless" ;;
-    3) login_paste_api_key ;;
+    1) "$codex" login --device-auth ;;
+    2) login_browser_oauth "$codex" "$headless" ;;
+    3) login_copy_auth_guide ;;
+    4) login_paste_api_key "$codex" ;;
     q|Q)
       log "已取消"
       exit 0
@@ -812,21 +776,105 @@ cmd_login() {
 
   if is_logged_in; then
     log "登录状态：OK"
-    if [[ -n "${XAI_API_KEY:-}" ]]; then
-      log "方式：XAI_API_KEY"
-    fi
+    "$codex" login status || true
     if authf="$(auth_file_present 2>/dev/null)"; then
       log "凭证文件：$authf"
     fi
-    log "可手动验证：\"$grok\" --no-auto-update -p \"Say ok.\" --output-format plain"
   else
-    err "仍未检测到凭证（~/.grok/auth.json 或 XAI_API_KEY）。"
-    err "订阅登录步骤："
-    err "  1) 有浏览器的电脑执行：grok login"
-    err "  2) scp ~/.grok/auth.json 当前用户@服务器:~/.grok/auth.json"
-    err "  3) 服务器：chmod 600 ~/.grok/auth.json && $0 login"
+    err "Codex 仍报告未登录，请重试 device auth，或检查当前用户的 ~/.codex/auth.json。"
     exit 1
   fi
+}
+
+login_browser_oauth() {
+  local codex="$1"
+  local headless="${2:-0}"
+  if [[ "$headless" != "1" ]]; then
+    "$codex" login
+    return
+  fi
+
+  need_cmd curl || die "SSH 回传 OAuth 需要 curl，请先执行：$0 deps"
+  echo
+  echo "将启动服务器本机的 OAuth 回调监听。授权后，本机浏览器会停在"
+  echo "http://localhost:1455/auth/callback?...（页面打不开是正常的）。"
+  echo "请复制浏览器地址栏的完整回调 URL，再粘贴回本 SSH；脚本会从服务器本机转交。"
+  echo "注意：回调 URL 含一次性授权码，不要发送给他人，也不要保存到 shell 历史。"
+  echo
+
+  local login_log login_pid callback_url i
+  login_log="$(mktemp "${TMPDIR:-/tmp}/codex-login.XXXXXX")"
+  # 后台 Codex 不读取 SSH stdin，避免与下方 callback 输入提示争抢终端。
+  "$codex" login </dev/null > >(tee "$login_log") 2>&1 &
+  login_pid=$!
+  trap 'kill "$login_pid" 2>/dev/null || true; rm -f "$login_log"' INT TERM
+
+  # 等 Codex 打印授权地址再显示输入提示，避免后台输出把提示冲乱。
+  for i in $(seq 1 100); do
+    if grep -q 'oauth/authorize' "$login_log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$login_pid" 2>/dev/null; then
+      if wait "$login_pid"; then :; else
+        local early_rc=$?
+        rm -f "$login_log"
+        trap - INT TERM
+        return "$early_rc"
+      fi
+      rm -f "$login_log"
+      trap - INT TERM
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo
+  echo -n "粘贴完整 callback URL（输入 q 取消）> "
+  read -r callback_url
+  if [[ "$callback_url" == "q" || "$callback_url" == "Q" ]]; then
+    kill "$login_pid" 2>/dev/null || true
+    wait "$login_pid" 2>/dev/null || true
+    rm -f "$login_log"
+    trap - INT TERM
+    log "已取消浏览器 OAuth"
+    return 1
+  fi
+
+  # 仅允许投递给 Codex 固定的本机回调端点，禁止把该输入变成任意 URL 请求。
+  case "$callback_url" in
+    'http://localhost:1455/auth/callback?'*|'http://127.0.0.1:1455/auth/callback?'*) ;;
+    *)
+      err "回调地址不合法；必须以 http://localhost:1455/auth/callback? 开头。"
+      kill "$login_pid" 2>/dev/null || true
+      wait "$login_pid" 2>/dev/null || true
+      rm -f "$login_log"
+      trap - INT TERM
+      return 1
+      ;;
+  esac
+  if [[ "$callback_url" != *'code='* || "$callback_url" != *'state='* ]]; then
+    err "回调地址缺少 code 或 state 参数。"
+    kill "$login_pid" 2>/dev/null || true
+    wait "$login_pid" 2>/dev/null || true
+    rm -f "$login_log"
+    trap - INT TERM
+    return 1
+  fi
+
+  if ! curl -fsS --noproxy '*' --max-time 15 "$callback_url" >/dev/null; then
+    err "无法把回调交给服务器 localhost:1455；Codex 登录监听可能已经退出。"
+    kill "$login_pid" 2>/dev/null || true
+    wait "$login_pid" 2>/dev/null || true
+    rm -f "$login_log"
+    trap - INT TERM
+    return 1
+  fi
+  log "回调已转交给 Codex，等待登录完成..."
+  local login_rc=0
+  wait "$login_pid" || login_rc=$?
+  rm -f "$login_log"
+  trap - INT TERM
+  return "$login_rc"
 }
 
 # 订阅登录：本机 OAuth 后把 auth.json 拷到服务器
@@ -838,35 +886,33 @@ login_copy_auth_guide() {
   echo
   echo "========== 订阅账号登录（无 GUI 服务器）=========="
   echo
-  echo "原理：grok login = 浏览器 OAuth，token 写在 ~/.grok/auth.json。"
+  echo "原理：Codex 可把认证缓存写在 ~/.codex/auth.json。"
   echo "      在有浏览器的电脑登录一次，把该文件拷到服务器 = 服务器已登录。"
-  echo "      （使用 SuperGrok / X Premium+ 订阅额度，不是 API 按量计费）"
+  echo "      凭证非常敏感，只能在你自己的受信任机器之间复制。"
   echo
   echo "—— A. 在你自己的 Windows / Mac 上 ——"
-  echo "  1. 安装 CLI（没有的话）："
-  echo "       Windows PowerShell:  irm https://x.ai/cli/install.ps1 | iex"
-  echo "       Mac / Linux:         curl -fsSL https://x.ai/cli/install.sh | bash"
-  echo "  2. 登录（会打开浏览器，用 xAI / X 账号授权）："
-  echo "       grok login"
+  echo "  1. 安装 CLI：npm install -g @openai/codex"
+  echo "  2. 登录（会打开浏览器，用 ChatGPT 账号授权）："
+  echo "       codex login"
   echo "  3. 确认文件存在："
-  echo "       Windows:   dir %USERPROFILE%\\.grok\\auth.json"
-  echo "       Mac/Linux: ls -la ~/.grok/auth.json"
+  echo "       Windows:   dir %USERPROFILE%\\.codex\\auth.json"
+  echo "       Mac/Linux: ls -la ~/.codex/auth.json"
   echo
   echo "—— B. 拷到本服务器（用户 ${user_hint}@${host_hint}）——"
   echo "  先在服务器准备目录："
-  echo "    mkdir -p ~/.grok && chmod 700 ~/.grok"
+  echo "    mkdir -p ~/.codex && chmod 700 ~/.codex"
   echo
   echo "  在你电脑上执行（把 服务器IP 换成真实 IP）："
   echo "    # Windows PowerShell 示例："
-  echo "    scp \$env:USERPROFILE\\.grok\\auth.json ${user_hint}@服务器IP:~/.grok/auth.json"
+  echo "    scp \$env:USERPROFILE\\.codex\\auth.json ${user_hint}@服务器IP:~/.codex/auth.json"
   echo "    # 或拷整个目录："
-  echo "    scp -r \$env:USERPROFILE\\.grok ${user_hint}@服务器IP:~/"
+  echo "    scp -r \$env:USERPROFILE\\.codex ${user_hint}@服务器IP:~/"
   echo
   echo "    # Mac / Linux 示例："
-  echo "    scp ~/.grok/auth.json ${user_hint}@服务器IP:~/.grok/auth.json"
+  echo "    scp ~/.codex/auth.json ${user_hint}@服务器IP:~/.codex/auth.json"
   echo
   echo "—— C. 服务器收尾 ——"
-  echo "    chmod 600 ~/.grok/auth.json"
+  echo "    chmod 600 ~/.codex/auth.json"
   echo "    ./run.sh login     # 应显示 Login OK"
   echo "    ./run.sh start"
   echo
@@ -875,92 +921,35 @@ login_copy_auth_guide() {
   local ans
   read -r ans
   if [[ "$ans" == [Qq]* ]]; then
-    log "先去本机 grok login 并 scp 凭证，完成后再运行：$0 login"
+    log "先去本机 codex login 并 scp 凭证，完成后再运行：$0 login"
     exit 0
   fi
-  mkdir -p "${HOME}/.grok"
-  chmod 700 "${HOME}/.grok" 2>/dev/null || true
-  if [[ -f "${HOME}/.grok/auth.json" ]]; then
-    chmod 600 "${HOME}/.grok/auth.json" 2>/dev/null || true
-    log "已找到 ${HOME}/.grok/auth.json"
+  mkdir -p "${HOME}/.codex"
+  chmod 700 "${HOME}/.codex" 2>/dev/null || true
+  if [[ -f "${HOME}/.codex/auth.json" ]]; then
+    chmod 600 "${HOME}/.codex/auth.json" 2>/dev/null || true
+    log "已找到 ${HOME}/.codex/auth.json"
   else
     # 有的版本可能用 credentials.json
     if authf="$(auth_file_present 2>/dev/null)"; then
       log "已找到凭证：$authf"
     else
-      err "仍未找到 ${HOME}/.grok/auth.json"
+      err "仍未找到 ${HOME}/.codex/auth.json"
       err "请确认 scp 的目标用户与当前用户一致（现在是 $(id -un)，HOME=$HOME）。"
-      err "在服务器执行：ls -la ~/.grok/"
+      err "在服务器执行：ls -la ~/.codex/"
     fi
-  fi
-}
-
-# 本机 grok login；无 GUI 时用 BROWSER 脚本把 URL 打到终端
-login_run_grok_login() {
-  local grok="$1"
-  local headless="${2:-0}"
-  local browser_helper=""
-
-  echo
-  if [[ "$headless" == "1" ]]; then
-    echo "无 GUI：尽量把登录链接打印到终端（不弹窗）。"
-    echo "出现 https://... 后，用手机/电脑浏览器打开并授权，再回到 SSH 等待。"
-    echo
-    echo "若授权后跳转到 http://127.0.0.1:端口 且服务器一直失败，"
-    echo "说明回调只能在「发起登录的那台机器」完成 → 请改用选项 1（本机登录后 scp）。"
-    echo
-    echo -n "开始 grok login？[Y/n] > "
-    local cont
-    read -r cont
-    if [[ "$cont" == [Nn]* ]]; then
-      log "已取消。推荐：$0 login 选 1"
-      exit 0
-    fi
-
-    browser_helper="$(mktemp "${TMPDIR:-/tmp}/grok-browser.XXXXXX")"
-    cat > "$browser_helper" <<'EOS'
-#!/bin/sh
-echo ""
-echo "========== 请用浏览器打开下面的登录链接 =========="
-echo "$*"
-echo "=================================================="
-echo "（授权完成后回到本 SSH 窗口等待，不要关这个进程）"
-echo ""
-mkdir -p "${HOME}/.grok" 2>/dev/null || true
-printf '%s\n' "$*" >> "${HOME}/.grok/last-login-url.txt" 2>/dev/null || true
-exit 0
-EOS
-    chmod +x "$browser_helper"
-    mkdir -p "${HOME}/.grok"
-    export BROWSER="$browser_helper"
-    export GROK_BROWSER="$browser_helper"
-  fi
-
-  log "启动：$grok login"
-  set +e
-  if "$grok" login; then
-    :
-  elif "$grok" auth login; then
-    :
-  else
-    log "无 login 子命令，尝试启动交互会话（成功后 /quit 或 Ctrl-C）..."
-    "$grok" || true
-  fi
-  set -e
-
-  if [[ -n "$browser_helper" && -f "$browser_helper" ]]; then
-    rm -f "$browser_helper"
   fi
 }
 
 login_paste_api_key() {
+  local codex="$1"
   echo
   echo "API Key 是按量计费路径，与「订阅 OAuth 登录」不是同一套。"
-  echo "  ① 浏览器打开：https://console.x.ai/"
-  echo "  ② 创建 / 复制 API Key（形如 xai-...）"
+  echo "  ① 浏览器打开：https://platform.openai.com/api-keys"
+  echo "  ② 创建 / 复制 OpenAI API Key"
   echo "  ③ 粘贴到下方（不回显）"
   echo
-  echo -n "请粘贴 XAI_API_KEY: "
+  echo -n "请粘贴 OPENAI_API_KEY: "
   local key
   if [[ -t 0 ]]; then
     stty -echo 2>/dev/null || true
@@ -974,16 +963,9 @@ login_paste_api_key() {
   if [[ -z "$key" ]]; then
     die "API Key 为空"
   fi
-  if [[ "$key" != xai-* && "$key" != xai_* ]]; then
-    log "提示：密钥通常以 xai- 开头；若你确认无误可忽略。"
-  fi
-  local env_snippet="${ROOT}/.env.xai"
-  umask 077
-  printf 'export XAI_API_KEY=%q\n' "$key" > "$env_snippet"
-  chmod 600 "$env_snippet"
-  # shellcheck disable=SC1090
-  source "$env_snippet"
-  log "已写入 $env_snippet（权限 600）。./run.sh start 会自动加载。"
+  printf '%s' "$key" | "$codex" login --with-api-key
+  unset key
+  log "API Key 已交给 Codex CLI 保存；不会写入本项目的 .env。"
 }
 
 # ---------------------------------------------------------------------------
@@ -1003,15 +985,15 @@ env_file_set() {
 
 gen_api_key() {
   if need_cmd openssl; then
-    printf 'gk-%s' "$(openssl rand -hex 16)"
+    printf 'cxg-%s' "$(openssl rand -hex 16)"
   else
-    "$PYTHON" -c 'import secrets; print("gk-" + secrets.token_hex(16), end="")'
+    "$PYTHON" -c 'import secrets; print("cxg-" + secrets.token_hex(16), end="")'
   fi
 }
 
 expose_show() {
   load_optional_env
-  local host="${GROK_CLI_HOST:-127.0.0.1}"
+  local host="${CODEX_CLI_HOST:-127.0.0.1}"
   echo "---- 对外开放状态 ----"
   echo "监听地址 : $host"
   if [[ "$host" == "127.0.0.1" || "$host" == "localhost" || "$host" == "::1" ]]; then
@@ -1019,7 +1001,7 @@ expose_show() {
   else
     echo "范围     : 对外开放（0.0.0.0 = 本机所有网卡，含 Docker 网桥/公网网卡）"
   fi
-  if [[ -n "${GROK_CLI_API_KEY:-}" ]]; then
+  if [[ -n "${CODEX_CLI_API_KEY:-}" ]]; then
     echo "网关密钥 : 已设置（调用需 Authorization: Bearer <key>）"
   else
     echo "网关密钥 : 未设置（任何能连上端口的人都可白嫖你的额度！）"
@@ -1043,9 +1025,9 @@ cmd_expose() {
   case "$sub" in
     on|open)
       load_optional_env
-      env_file_set GROK_CLI_HOST "0.0.0.0"
-      export GROK_CLI_HOST="0.0.0.0"
-      local key="${1:-${GROK_CLI_API_KEY:-}}"
+      env_file_set CODEX_CLI_HOST "0.0.0.0"
+      export CODEX_CLI_HOST="0.0.0.0"
+      local key="${1:-${CODEX_CLI_API_KEY:-}}"
       if [[ -z "$key" ]]; then
         key="$(gen_api_key)"
         log "未指定密钥，已随机生成"
@@ -1053,20 +1035,20 @@ cmd_expose() {
         err "密钥太短（${#key} 位），已替换为随机强密钥"
         key="$(gen_api_key)"
       fi
-      env_file_set GROK_CLI_API_KEY "$key"
-      export GROK_CLI_API_KEY="$key"
-      log "已写入 $ENV_FILE：GROK_CLI_HOST=0.0.0.0"
-      log "网关密钥 GROK_CLI_API_KEY=${key}"
+      env_file_set CODEX_CLI_API_KEY "$key"
+      export CODEX_CLI_API_KEY="$key"
+      log "已写入 $ENV_FILE：CODEX_CLI_HOST=0.0.0.0"
+      log "网关密钥 CODEX_CLI_API_KEY=${key}"
       log "调用方请求头：Authorization: Bearer ${key}"
       log "（HeySure 模型预设里 API Key 填这个值）"
       err "安全提醒：0.0.0.0 含公网网卡。若只想给本机 Docker 容器用，"
-      err "请在云安全组/防火墙里保持 ${GROK_CLI_PORT:-8100} 端口对公网关闭。"
+      err "请在云安全组/防火墙里保持 ${CODEX_CLI_PORT:-8120} 端口对公网关闭。"
       expose_apply
       ;;
     off|local|close)
       load_optional_env
-      env_file_set GROK_CLI_HOST "127.0.0.1"
-      export GROK_CLI_HOST="127.0.0.1"
+      env_file_set CODEX_CLI_HOST "127.0.0.1"
+      export CODEX_CLI_HOST="127.0.0.1"
       log "已改回仅本机监听（127.0.0.1）"
       expose_apply
       ;;
@@ -1113,7 +1095,7 @@ cmd_expose() {
 说明:
   - 对外开放后调用方必须带 Authorization: Bearer <密钥>。
   - 只想给本机 Docker 容器用时：expose on 即可，同时在云安全组里
-    保持 8100 端口对公网关闭（容器经宿主机网桥访问，不走公网）。
+    保持 8120 端口对公网关闭（容器经宿主机网桥访问，不走公网）。
 EOF
       exit 1
       ;;
@@ -1125,11 +1107,6 @@ load_optional_env() {
   if [[ -f "$PROXY_ENV_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$PROXY_ENV_FILE"
-  fi
-  # 若用户通过 login 选项 2 写入了 .env.xai，启动时自动加载
-  if [[ -f "${ROOT}/.env.xai" ]]; then
-    # shellcheck disable=SC1091
-    source "${ROOT}/.env.xai"
   fi
   # 通用 .env（KEY=VALUE，可选）
   if [[ -f "${ROOT}/.env" ]]; then
@@ -1177,7 +1154,7 @@ cmd_autostart_enable() {
 
   {
     printf '[Unit]\n'
-    printf 'Description=Grok CLI OpenAI-compatible gateway\n'
+    printf 'Description=Codex CLI OpenAI-compatible gateway\n'
     printf 'After=network-online.target\n'
     printf 'Wants=network-online.target\n\n'
     printf '[Service]\n'
@@ -1292,27 +1269,27 @@ cmd_start() {
   ensure_runtime
 
   if is_running; then
-    log "已在运行 (pid $(pid_of)) http://${GROK_CLI_HOST}:${GROK_CLI_PORT}"
+    log "已在运行 (pid $(pid_of)) http://${CODEX_CLI_HOST}:${CODEX_CLI_PORT}"
     return 0
   fi
 
   need_cmd "$PYTHON" || die "未找到 $PYTHON，请先：$0 deps"
   [[ -f "${ROOT}/server.py" ]] || die "缺少 server.py"
 
-  if ! resolve_grok >/dev/null 2>&1; then
-    err "未找到 grok CLI。建议先：$0 install-cli && $0 login"
+  if ! resolve_codex >/dev/null 2>&1; then
+    err "未找到 Codex CLI。建议先：$0 install-cli && $0 login"
     err "仍将启动网关；请求到达时会因 CLI 缺失而失败。"
   else
-    export GROK_CLI_COMMAND="$(resolve_grok)"
+    export CODEX_CLI_COMMAND="$(resolve_codex)"
   fi
 
   if ! is_logged_in; then
-    err "警告：未检测到 grok 登录凭证（~/.grok/auth.json 或 XAI_API_KEY）。"
+    err "警告：Codex CLI 当前未登录。"
     err "推理请求可能失败。可执行：$0 login"
   fi
 
-  log "启动网关 → http://${GROK_CLI_HOST}:${GROK_CLI_PORT}/v1/chat/completions"
-  log "CLI=${GROK_CLI_COMMAND:-<未设置>}  MODELS=${GROK_CLI_MODELS}"
+  log "启动网关 → http://${CODEX_CLI_HOST}:${CODEX_CLI_PORT}/v1/chat/completions"
+  log "CLI=${CODEX_CLI_COMMAND:-<未设置>}  MODELS=${CODEX_CLI_MODELS:-<由 Codex CLI 动态发现>}"
   log "Proxy=$(proxy_display)"
   log "日志：$LOG_FILE"
 
@@ -1326,7 +1303,7 @@ cmd_start() {
   sleep 0.5
   if kill -0 "$pid" 2>/dev/null; then
     log "已启动 pid=$pid"
-    log "健康检查：curl -sS http://${GROK_CLI_HOST}:${GROK_CLI_PORT}/"
+    log "健康检查：curl -sS http://${CODEX_CLI_HOST}:${CODEX_CLI_PORT}/"
   else
     rm -f "$PID_FILE"
     die "进程启动后立即退出，请查看日志：tail -n 50 $LOG_FILE"
@@ -1378,11 +1355,11 @@ cmd_restart() {
 cmd_status() {
   load_optional_env
   export_defaults
-  echo "---- grok_cli status ----"
+  echo "---- codex_cli status ----"
   echo "ROOT     : $ROOT"
-  echo "HOST:PORT: ${GROK_CLI_HOST:-127.0.0.1}:${GROK_CLI_PORT:-8100}"
+  echo "HOST:PORT: ${CODEX_CLI_HOST:-127.0.0.1}:${CODEX_CLI_PORT:-8120}"
   echo "Autostart: $(autostart_status_text)"
-  if cmd="$(resolve_grok 2>/dev/null)"; then
+  if cmd="$(resolve_codex 2>/dev/null)"; then
     echo "CLI      : $cmd"
   else
     echo "CLI      : (未找到)"
@@ -1390,9 +1367,7 @@ cmd_status() {
   if is_logged_in; then
     local authf
     authf="$(auth_file_present 2>/dev/null || true)"
-    if [[ -n "${XAI_API_KEY:-}" ]]; then
-      echo "Login    : OK (XAI_API_KEY)"
-    elif [[ -n "$authf" ]]; then
+    if [[ -n "$authf" ]]; then
       echo "Login    : OK ($authf)"
     else
       echo "Login    : OK"
@@ -1402,11 +1377,15 @@ cmd_status() {
   fi
   echo "Proxy    : $(proxy_display)"
   # 健康检查地址：监听 0.0.0.0 时本机探测用 127.0.0.1
-  local hh="${GROK_CLI_HOST:-127.0.0.1}"
+  local hh="${CODEX_CLI_HOST:-127.0.0.1}"
   if [[ "$hh" == "0.0.0.0" || "$hh" == "::" ]]; then
     hh="127.0.0.1"
   fi
-  local url="http://${hh}:${GROK_CLI_PORT:-8100}/"
+  local url="http://${hh}:${CODEX_CLI_PORT:-8120}/"
+  local curl_auth=()
+  if [[ -n "${CODEX_CLI_API_KEY:-}" ]]; then
+    curl_auth=(-H "Authorization: Bearer ${CODEX_CLI_API_KEY}")
+  fi
   if systemd_unit_active || is_running; then
     if systemd_unit_active; then
       echo "Gateway  : running (systemd: $SYSTEMD_UNIT_NAME)"
@@ -1415,7 +1394,7 @@ cmd_status() {
     fi
     if need_cmd curl; then
       # 健康检查直连本机，避免被 http_proxy 劫持
-      if out="$(curl -fsS --max-time 2 --noproxy '*' "$url" 2>/dev/null)"; then
+      if out="$(curl -fsS --max-time 2 --noproxy '*' "${curl_auth[@]}" "$url" 2>/dev/null)"; then
         echo "Health   : OK  $out"
       else
         echo "Health   : 进程在但 HTTP 无响应（检查 host/port/防火墙）"
@@ -1425,8 +1404,8 @@ cmd_status() {
     echo "Gateway  : stopped"
     # pid 文件丢失/不匹配，但端口上仍有服务在响应的情况
     if need_cmd curl; then
-      if out="$(curl -fsS --max-time 2 --noproxy '*' "$url" 2>/dev/null)"; then
-        echo "注意     : 端口 ${GROK_CLI_PORT:-8100} 仍有网关响应，但不是本脚本记录的进程"
+      if out="$(curl -fsS --max-time 2 --noproxy '*' "${curl_auth[@]}" "$url" 2>/dev/null)"; then
+        echo "注意     : 端口 ${CODEX_CLI_PORT:-8120} 仍有网关响应，但不是本脚本记录的进程"
         echo "           $out"
         echo "           可能：pid 文件丢失 / 在别的目录启动过。可 pkill -f 'server.py' 后重新 start"
       fi
@@ -1462,10 +1441,10 @@ cmd_fg() {
   export_defaults
   ensure_runtime
   need_cmd "$PYTHON" || die "未找到 $PYTHON，请先：$0 deps"
-  if cmd="$(resolve_grok 2>/dev/null)"; then
-    export GROK_CLI_COMMAND="$cmd"
+  if cmd="$(resolve_codex 2>/dev/null)"; then
+    export CODEX_CLI_COMMAND="$cmd"
   fi
-  log "前台启动（Ctrl-C 退出）CLI=${GROK_CLI_COMMAND:-<未设置>}"
+  log "前台启动（Ctrl-C 退出）CLI=${CODEX_CLI_COMMAND:-<未设置>}"
   exec "$PYTHON" -u server.py
 }
 
@@ -1477,12 +1456,12 @@ menu() {
   while true; do
     load_optional_env 2>/dev/null || true
     echo
-    echo "========== grok_cli 管理 =========="
+    echo "========== codex_cli 管理 =========="
     echo "  1) 安装系统依赖 (deps)"
-    echo "  2) 安装 / 更新 grok CLI (install-cli)"
+    echo "  2) 安装 / 更新 Codex CLI (install-cli)"
     echo "  3) 检查 / 完成登录 (login)"
     echo "  4) 配置系统代理 (proxy)   当前: $(proxy_display)"
-    echo "  e) 对外开放/收回 (expose) 当前监听: ${GROK_CLI_HOST:-127.0.0.1}"
+    echo "  e) 对外开放/收回 (expose) 当前监听: ${CODEX_CLI_HOST:-127.0.0.1}"
     echo "  5) 启动网关 (start)"
     echo "  6) 停止网关 (stop)"
     echo "  7) 重启网关 (restart)"
@@ -1519,9 +1498,9 @@ usage() {
 用法: ./run.sh [命令]
 
 命令:
-  deps          安装系统依赖（python3 / curl）
-  install-cli   安装或更新官方 grok CLI
-  login         检查登录；未登录则引导 login 或填写 XAI_API_KEY
+  deps          安装系统依赖（python3 / curl / Node.js / npm）
+  install-cli   安装或更新官方 Codex CLI
+  login         检查登录；支持 device auth、浏览器 OAuth、凭证复制或 API Key
   proxy         配置系统 HTTP/HTTPS/SOCKS 代理（网址 + 端口）
     proxy set --host HOST --port PORT [--scheme http|socks5]
     proxy set --url http://HOST:PORT

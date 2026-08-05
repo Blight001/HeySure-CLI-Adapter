@@ -849,7 +849,12 @@ class Handler(BaseHTTPRequestHandler):
         mcp_match = re.match(r"^/mcp/([0-9a-f]{8})$", path)
         if mcp_match:
             # grok 的 MCP 客户端不带我们的 Bearer；token 即会话凭据，仅监听回环。
-            self._handle_mcp(mcp_match.group(1))
+            try:
+                self._handle_mcp(mcp_match.group(1))
+            except (BrokenPipeError, ConnectionError):
+                # tools/call 可能等待较久；若 MCP 客户端先超时断开，写回响应时
+                # 不应让 socketserver 把正常的连接关闭打印成线程异常。
+                self.close_connection = True
             return
         if not path.endswith("/chat/completions"):
             self._error(404, f"Unknown path: {path}（仅支持 /v1/chat/completions）")

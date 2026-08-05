@@ -146,5 +146,19 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         registry.drop(created[0])
 
 
+class HandlerDisconnectTest(unittest.TestCase):
+    def test_mcp_client_disconnect_does_not_escape_request_handler(self):
+        handler = object.__new__(server.Handler)
+        handler.close_connection = False
+
+        with mock.patch.object(handler, "_path", return_value="/mcp/1234abcd"), mock.patch.object(
+            handler, "_handle_mcp", side_effect=BrokenPipeError(32, "Broken pipe")
+        ) as handle_mcp:
+            handler.do_POST()
+
+        handle_mcp.assert_called_once_with("1234abcd")
+        self.assertTrue(handler.close_connection)
+
+
 if __name__ == "__main__":
     unittest.main()
