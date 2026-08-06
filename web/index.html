@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HeySure CLI Adapter</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #e8ecf6; background: radial-gradient(circle at 15% 10%, #1c315b 0, transparent 34%), #090d17; }
+    main { width: min(900px, calc(100% - 32px)); margin: 32px auto; }
+    header { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-bottom: 20px; }
+    h1 { margin: 0 0 7px; font-size: 25px; }
+    p { margin: 0; color: #96a0b7; line-height: 1.6; font-size: 13px; }
+    .badge { border: 1px solid #34405a; background: #121a2a; color: #a9b4cb; padding: 7px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+    .badge.ok { color: #88efba; border-color: #27644b; background: #10271f; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { background: rgba(17,24,39,.88); border: 1px solid #263047; border-radius: 16px; padding: 19px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }
+    .card h2 { font-size: 15px; margin: 0 0 15px; color: #f6f8ff; }
+    label { display: block; margin: 12px 0 6px; color: #aab3c8; font-size: 12px; }
+    input, select { width: 100%; border: 1px solid #34405a; background: #0c1220; color: #edf1fb; border-radius: 9px; padding: 10px 11px; outline: none; }
+    input:focus, select:focus { border-color: #6b8cff; box-shadow: 0 0 0 3px rgba(107,140,255,.12); }
+    .platforms { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+    .platforms label { margin: 0; }
+    .platforms input { position: absolute; opacity: 0; pointer-events: none; }
+    .platforms span { display: block; padding: 10px 5px; border: 1px solid #34405a; border-radius: 9px; text-align: center; cursor: pointer; font-size: 12px; }
+    .platforms input:checked + span { border-color: #6b8cff; color: #dfe6ff; background: #1b2850; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .toggle { display: flex; align-items: center; gap: 9px; margin-top: 15px; cursor: pointer; }
+    .toggle input { width: 17px; height: 17px; }
+    button { border: 0; border-radius: 10px; padding: 11px 18px; color: white; background: linear-gradient(135deg,#5577f5,#7957e8); cursor: pointer; font-weight: 650; }
+    button:disabled { opacity: .55; cursor: wait; }
+    footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
+    #message { font-size: 12px; color: #aab3c8; }
+    #message.error { color: #ff9d9d; }
+    .status { display: grid; grid-template-columns: 130px 1fr; gap: 9px; font-size: 12px; }
+    .status dt { color: #77839d; }
+    .status dd { margin: 0; color: #d6ddeb; word-break: break-all; }
+    .hint { margin-top: 14px; padding: 11px; border: 1px solid #283552; border-radius: 10px; background: #0d1526; }
+    code { color: #b8c9ff; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } header { display: block; } .badge { display: inline-block; margin-top: 12px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>HeySure CLI Adapter</h1><p>一处配置 Codex、Grok、Antigravity，并作为自定义设备接入 HeySure。</p></div>
+    <div id="badge" class="badge">正在读取状态…</div>
+  </header>
+  <form id="form">
+    <div class="grid">
+      <section class="card">
+        <h2>HeySure 连接</h2>
+        <label for="server">服务器地址</label><input id="server" name="server" placeholder="http://127.0.0.1:3000" required />
+        <div class="row">
+          <div><label for="account">账号</label><input id="account" name="account" required /></div>
+          <div><label for="password">密码</label><input id="password" name="password" type="password" placeholder="留空表示保持不变" /></div>
+        </div>
+        <label for="deviceId">稳定设备 ID</label><input id="deviceId" name="deviceId" required />
+        <label for="name">网页展示名称</label><input id="name" name="name" required />
+      </section>
+      <section class="card">
+        <h2>本机 CLI</h2>
+        <div class="platforms">
+          <label><input type="radio" name="platform" value="codex" checked /><span>Codex</span></label>
+          <label><input type="radio" name="platform" value="grok" /><span>Grok</span></label>
+          <label><input type="radio" name="platform" value="antigravity" /><span>Antigravity</span></label>
+        </div>
+        <label for="command">CLI 命令或完整路径</label><input id="command" name="command" placeholder="留空使用平台默认命令" />
+        <div class="row">
+          <div><label for="model">模型</label><input id="model" name="model" placeholder="留空使用 CLI 默认" /></div>
+          <div><label for="timeoutSeconds">超时（秒）</label><input id="timeoutSeconds" name="timeoutSeconds" type="number" min="30" max="900" /></div>
+        </div>
+        <label for="workspace">工作目录</label><input id="workspace" name="workspace" placeholder="留空使用 Adapter 目录" />
+        <div id="sandboxWrap"><label for="sandbox">Codex 沙箱</label><select id="sandbox" name="sandbox"><option value="read-only">只读</option><option value="workspace-write">可写工作区</option><option value="danger-full-access">完全访问</option></select></div>
+        <label class="toggle"><input id="enabled" name="enabled" type="checkbox" /><span>启用并启动所选 CLI</span></label>
+      </section>
+    </div>
+    <footer><span id="message">配置仅保存在本机。</span><button id="save" type="submit">保存并应用</button></footer>
+  </form>
+  <section class="card" style="margin-top:16px">
+    <h2>运行状态</h2>
+    <dl class="status">
+      <dt>HeySure Socket</dt><dd id="socketStatus">—</dd>
+      <dt>设备注册</dt><dd id="registerStatus">—</dd>
+      <dt>CLI 网关</dt><dd id="gatewayStatus">—</dd>
+      <dt>当前平台 / 模型</dt><dd id="platformStatus">—</dd>
+      <dt>错误</dt><dd id="errorStatus">—</dd>
+    </dl>
+    <p class="hint">上线后仍需在 HeySure“作坊”里给此设备<strong>分配 AI 成员</strong>，并在 MCP 权限中勾选 <code>cli.run</code>、<code>cli.models</code>、<code>cli.status</code>。之后 AI 才能主动控制本机 CLI。</p>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id)
+  const form = $('form'), message = $('message'), save = $('save')
+  function platform() { return new FormData(form).get('platform') }
+  function platformUi() {
+    $('sandboxWrap').style.display = platform() === 'codex' ? '' : 'none'
+    $('command').placeholder = `留空使用 ${platform() === 'antigravity' ? 'agy' : platform()} 默认命令`
+  }
+  document.querySelectorAll('[name=platform]').forEach(x => x.addEventListener('change', platformUi))
+  async function loadConfig() {
+    const c = await fetch('/api/config').then(r => r.json())
+    for (const key of ['server','account','deviceId','name','command','model','workspace','timeoutSeconds','sandbox']) if ($(key)) $(key).value = c[key] ?? ''
+    const radio = document.querySelector(`[name=platform][value="${c.platform}"]`); if (radio) radio.checked = true
+    $('password').placeholder = c.passwordConfigured ? '已保存；留空保持不变' : '请输入 HeySure 密码'
+    $('enabled').checked = !!c.enabled
+    platformUi()
+  }
+  async function loadStatus() {
+    try {
+      const s = await fetch('/api/status').then(r => r.json()), g = s.gateway || {}
+      $('socketStatus').textContent = s.heysureConnected ? '已连接' : '未连接'
+      $('registerStatus').textContent = s.registered ? `已注册（${s.deviceId}）` : '未注册'
+      $('gatewayStatus').textContent = g.ready ? '已就绪' : (g.enabled ? '未就绪' : '未启用')
+      $('platformStatus').textContent = `${g.platform || '—'} / ${g.model || '—'}`
+      $('errorStatus').textContent = g.error || '—'
+      $('badge').textContent = s.registered && g.ready ? '全部就绪' : '等待配置或连接'
+      $('badge').className = 'badge' + (s.registered && g.ready ? ' ok' : '')
+    } catch { $('badge').textContent = '状态读取失败' }
+  }
+  form.addEventListener('submit', async e => {
+    e.preventDefault(); save.disabled = true; message.className = ''; message.textContent = '正在保存并启动…'
+    const fd = new FormData(form), payload = Object.fromEntries(fd.entries())
+    payload.timeoutSeconds = Number(payload.timeoutSeconds); payload.enabled = $('enabled').checked
+    try {
+      const res = await fetch('/api/config', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+      const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || '保存失败')
+      $('password').value = ''; $('password').placeholder = '已保存；留空保持不变'
+      message.textContent = '已保存并应用'; setTimeout(loadStatus, 500)
+    } catch (err) { message.className = 'error'; message.textContent = err.message }
+    finally { save.disabled = false }
+  })
+  Promise.all([loadConfig(), loadStatus()]).catch(err => { message.className='error'; message.textContent=err.message })
+  setInterval(loadStatus, 3000)
+</script>
+</body>
+</html>

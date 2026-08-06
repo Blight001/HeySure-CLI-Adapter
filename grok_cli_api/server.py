@@ -26,6 +26,7 @@ headless 对话无状态：每轮把完整历史序列化进 prompt 文件。携
     GROK_CLI_HOST      监听地址（默认 127.0.0.1）
     GROK_CLI_PORT      监听端口（默认 8100）
     GROK_CLI_TIMEOUT   单次推理超时秒数（默认 600）
+    GROK_CLI_CWD       CLI 执行工作目录（默认网关 runtime 目录）
     GROK_CLI_API_KEY   可选；设置后要求请求携带 Bearer <key>
     GROK_CLI_MODELS    /v1/models 返回的模型 id 列表（逗号分隔，仅展示用）
 """
@@ -339,6 +340,7 @@ class Config:
     host = os.environ.get("GROK_CLI_HOST", "127.0.0.1")
     port = int(os.environ.get("GROK_CLI_PORT", "8100") or 8100)
     timeout = int(os.environ.get("GROK_CLI_TIMEOUT", "600") or 600)
+    cwd = os.path.abspath(os.path.expanduser(os.environ.get("GROK_CLI_CWD", RUNTIME_DIR)))
     api_key = os.environ.get("GROK_CLI_API_KEY", "").strip()
     models = [
         m.strip()
@@ -693,7 +695,7 @@ def run_cli_turn(model: str, messages: List[Dict]):
         "--system-prompt-override",
         CLI_SYSTEM_WRAPPER,
         "--cwd",
-        RUNTIME_DIR,
+        Config.cwd,
     ] + CLI_FIXED_ARGS
     if str(model or "").strip():
         full_argv += ["-m", str(model).strip()]
@@ -705,7 +707,7 @@ def run_cli_turn(model: str, messages: List[Dict]):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=RUNTIME_DIR,
+            cwd=Config.cwd,
             creationflags=creationflags,
         )
     except OSError as exc:
@@ -1184,7 +1186,7 @@ class Handler(BaseHTTPRequestHandler):
                     model=model,
                     tools=tools_registry,
                     mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
-                    cwd=RUNTIME_DIR,
+                    cwd=Config.cwd,
                     registry=ACP_REGISTRY,
                 )
             except (RuntimeError, acp_bridge.AcpError) as exc:
@@ -1545,6 +1547,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=None, help="单次推理超时秒数（默认 600）")
     parser.add_argument("--api-key", default=None, help="可选：要求 Bearer 鉴权的 key")
     parser.add_argument("--models", default=None, help="/v1/models 展示的模型 id（逗号分隔）")
+    parser.add_argument("--cwd", default=None, help="CLI execution working directory")
     args = parser.parse_args()
 
     if args.command:
@@ -1560,7 +1563,11 @@ def main() -> None:
     if args.models:
         Config.models = [m.strip() for m in args.models.split(",") if m.strip()]
 
+    if args.cwd:
+        Config.cwd = os.path.abspath(os.path.expanduser(args.cwd))
+
     os.makedirs(RUNTIME_DIR, exist_ok=True)
+    os.makedirs(Config.cwd, exist_ok=True)
     try:
         argv = _resolve_cli_argv()
         print(f"CLI 命令：{argv[0]}")
