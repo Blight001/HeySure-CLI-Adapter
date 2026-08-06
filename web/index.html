@@ -1,138 +1,99 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>HeySure CLI Adapter</title>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HeySure CLI 控制台</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; color: #e8ecf6; background: radial-gradient(circle at 15% 10%, #1c315b 0, transparent 34%), #090d17; }
-    main { width: min(900px, calc(100% - 32px)); margin: 32px auto; }
-    header { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-bottom: 20px; }
-    h1 { margin: 0 0 7px; font-size: 25px; }
-    p { margin: 0; color: #96a0b7; line-height: 1.6; font-size: 13px; }
-    .badge { border: 1px solid #34405a; background: #121a2a; color: #a9b4cb; padding: 7px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
-    .badge.ok { color: #88efba; border-color: #27644b; background: #10271f; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .card { background: rgba(17,24,39,.88); border: 1px solid #263047; border-radius: 16px; padding: 19px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }
-    .card h2 { font-size: 15px; margin: 0 0 15px; color: #f6f8ff; }
-    label { display: block; margin: 12px 0 6px; color: #aab3c8; font-size: 12px; }
-    input, select { width: 100%; border: 1px solid #34405a; background: #0c1220; color: #edf1fb; border-radius: 9px; padding: 10px 11px; outline: none; }
-    input:focus, select:focus { border-color: #6b8cff; box-shadow: 0 0 0 3px rgba(107,140,255,.12); }
-    .platforms { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
-    .platforms label { margin: 0; }
-    .platforms input { position: absolute; opacity: 0; pointer-events: none; }
-    .platforms span { display: block; padding: 10px 5px; border: 1px solid #34405a; border-radius: 9px; text-align: center; cursor: pointer; font-size: 12px; }
-    .platforms input:checked + span { border-color: #6b8cff; color: #dfe6ff; background: #1b2850; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .toggle { display: flex; align-items: center; gap: 9px; margin-top: 15px; cursor: pointer; }
-    .toggle input { width: 17px; height: 17px; }
-    button { border: 0; border-radius: 10px; padding: 11px 18px; color: white; background: linear-gradient(135deg,#5577f5,#7957e8); cursor: pointer; font-weight: 650; }
-    button:disabled { opacity: .55; cursor: wait; }
-    footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
-    #message { font-size: 12px; color: #aab3c8; }
-    #message.error { color: #ff9d9d; }
-    .status { display: grid; grid-template-columns: 130px 1fr; gap: 9px; font-size: 12px; }
-    .status dt { color: #77839d; }
-    .status dd { margin: 0; color: #d6ddeb; word-break: break-all; }
-    .hint { margin-top: 14px; padding: 11px; border: 1px solid #283552; border-radius: 10px; background: #0d1526; }
-    code { color: #b8c9ff; }
-    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } header { display: block; } .badge { display: inline-block; margin-top: 12px; } }
+    :root{color-scheme:dark;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;--bg:#080c15;--card:#101726ef;--line:#29344c;--muted:#929db3;--primary:#6f8cff;--ok:#55d99a;--danger:#ff8297}*{box-sizing:border-box}body{margin:0;min-height:100vh;color:#eaf0fb;background:radial-gradient(circle at 10% 0,#1c376b 0,transparent 30%),radial-gradient(circle at 92% 10%,#38205c 0,transparent 25%),var(--bg)}main{width:min(1160px,calc(100% - 28px));margin:26px auto 54px}header,.line,.actions{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:26px;margin:0 0 7px}h2{font-size:16px;margin:0 0 15px}h3{font-size:12px;color:#bdc7da;margin:18px 0 8px}.muted,p{color:var(--muted);font-size:12px;line-height:1.6;margin:0}.badge,.pill{padding:7px 11px;border:1px solid #34405a;background:#121a2a;border-radius:99px;font-size:12px;white-space:nowrap}.badge.ok,.pill.ok{color:#8ceebb;border-color:#29634b;background:#10271f}.top-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin:20px 0}.top-tabs button{padding:13px;background:#111a2b;border:1px solid #34405a;color:#aeb8cd}.top-tabs button.active{border-color:#7892f2;background:#1d2c54;color:#fff}.page{display:none}.page.active{display:block}.layout{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:17px;padding:19px;box-shadow:0 16px 45px #0004}.span2{grid-column:1/-1}.hero-card{background:linear-gradient(135deg,#142345f2,#18182cf2)}label{display:block;color:#aab3c8;font-size:12px;margin:11px 0 5px}input,select,textarea{width:100%;border:1px solid #35415a;background:#0b1220;color:#edf2fb;border-radius:10px;padding:10px 11px;outline:none}textarea{min-height:90px;resize:vertical}input:focus,select:focus,textarea:focus{border-color:#6989f5;box-shadow:0 0 0 3px #6989f51f}.row{display:grid;grid-template-columns:1fr 1fr;gap:11px}.platform-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.platform-tabs button{background:#0d1422;border:1px solid #35415a;color:#abb5ca}.platform-tabs button.active{border-color:#718df3;background:#1b2850;color:#f0f3ff}.platform-section{display:none}.platform-section.active{display:block}.toggle{display:flex;align-items:center;gap:8px;margin-top:12px}.toggle input{width:17px;height:17px}.toggle label{margin:0}.hint{padding:11px;border:1px solid #2a3856;border-radius:10px;background:#0c1526;color:#98a8c5;font-size:11px;line-height:1.6}.notice{padding:12px;border-radius:11px;background:#2a2414;border:1px solid #66592d;color:#d5c58a;font-size:12px;line-height:1.55}.endpoint{padding:13px;border:1px solid #33466f;background:#0a1325;border-radius:11px;font:13px/1.5 ui-monospace,Consolas,monospace;color:#c9d7ff;word-break:break-all}button{border:0;border-radius:10px;padding:10px 14px;color:white;background:linear-gradient(135deg,#5678f5,#7857e7);cursor:pointer;font-weight:650}button.secondary{background:#172238;border:1px solid #35415a;color:#cbd4e6}button.warn{background:#633142;border:1px solid #925066}button.ghost{background:transparent;border:1px solid #35415a;color:#b7c2d7}button:disabled{opacity:.55;cursor:wait}.ops{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.ops button{font-size:12px;min-height:42px}.status{display:grid;grid-template-columns:140px 1fr;gap:9px;font-size:12px}.status dt{color:#78859e}.status dd{margin:0;word-break:break-all}.output{margin-top:10px;padding:12px;border-radius:10px;background:#080e19;border:1px solid #28334a;white-space:pre-wrap;word-break:break-word;max-height:310px;overflow:auto;color:#c5cfe1;font:12px/1.6 ui-monospace,Consolas,monospace}.message{font-size:12px;color:#a8b2c7}.message.error{color:#ff9f9f}code{color:#b9c9ff}.modal-backdrop{position:fixed;inset:0;z-index:50;background:#03060bbb;display:grid;place-items:center;padding:18px;backdrop-filter:blur(5px)}.modal-backdrop.hidden{display:none}.modal{width:min(720px,100%);max-height:min(84vh,780px);overflow:auto;background:#111a2a;border:1px solid #3a4863;border-radius:18px;box-shadow:0 30px 100px #000b}.modal-head{position:sticky;top:0;z-index:2;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px;background:#111a2af7;border-bottom:1px solid #2c3850}.modal-head h2{margin:0 0 4px}.modal-body{padding:18px}.modal-close{padding:7px 10px}.modal-state{display:flex;align-items:center;gap:8px;margin-bottom:12px;color:#aeb9ce;font-size:12px}.dot{width:9px;height:9px;border-radius:50%;background:#7f8ba1}.dot.busy{background:#78a1ff;box-shadow:0 0 0 5px #587df527}.dot.ok{background:var(--ok)}.dot.error{background:var(--danger)}.links{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.links a{color:#c7d5ff;border:1px solid #40547a;background:#15223b;padding:8px 10px;border-radius:9px;text-decoration:none;font-size:12px}.modal-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:15px}.toast-stack{position:fixed;right:18px;bottom:18px;z-index:70;display:grid;gap:8px;width:min(370px,calc(100% - 36px))}.toast{padding:12px 14px;border:1px solid #3d4b67;border-radius:11px;background:#182238f5;box-shadow:0 15px 45px #0008;font-size:12px;animation:toastin .18s ease}.toast.ok{border-color:#337258}.toast.error{border-color:#8f4858}@keyframes toastin{from{transform:translateY(8px);opacity:0}}@media(max-width:820px){.layout{grid-template-columns:1fr}.span2{grid-column:auto}.row{grid-template-columns:1fr}.ops{grid-template-columns:1fr 1fr}.top-tabs{grid-template-columns:1fr 1fr}header{align-items:flex-start}.actions{align-items:stretch;flex-wrap:wrap}}
   </style>
 </head>
-<body>
-<main>
-  <header>
-    <div><h1>HeySure CLI Adapter</h1><p>一处配置 Codex、Grok、Antigravity，并作为自定义设备接入 HeySure。</p></div>
-    <div id="badge" class="badge">正在读取状态…</div>
-  </header>
-  <form id="form">
-    <div class="grid">
-      <section class="card">
-        <h2>HeySure 连接</h2>
-        <label for="server">服务器地址</label><input id="server" name="server" placeholder="http://127.0.0.1:3000" required />
-        <div class="row">
-          <div><label for="account">账号</label><input id="account" name="account" required /></div>
-          <div><label for="password">密码</label><input id="password" name="password" type="password" placeholder="留空表示保持不变" /></div>
-        </div>
-        <label for="deviceId">稳定设备 ID</label><input id="deviceId" name="deviceId" required />
-        <label for="name">网页展示名称</label><input id="name" name="name" required />
-      </section>
-      <section class="card">
-        <h2>本机 CLI</h2>
-        <div class="platforms">
-          <label><input type="radio" name="platform" value="codex" checked /><span>Codex</span></label>
-          <label><input type="radio" name="platform" value="grok" /><span>Grok</span></label>
-          <label><input type="radio" name="platform" value="antigravity" /><span>Antigravity</span></label>
-        </div>
-        <label for="command">CLI 命令或完整路径</label><input id="command" name="command" placeholder="留空使用平台默认命令" />
-        <div class="row">
-          <div><label for="model">模型</label><input id="model" name="model" placeholder="留空使用 CLI 默认" /></div>
-          <div><label for="timeoutSeconds">超时（秒）</label><input id="timeoutSeconds" name="timeoutSeconds" type="number" min="30" max="900" /></div>
-        </div>
-        <label for="workspace">工作目录</label><input id="workspace" name="workspace" placeholder="留空使用 Adapter 目录" />
-        <div id="sandboxWrap"><label for="sandbox">Codex 沙箱</label><select id="sandbox" name="sandbox"><option value="read-only">只读</option><option value="workspace-write">可写工作区</option><option value="danger-full-access">完全访问</option></select></div>
-        <label class="toggle"><input id="enabled" name="enabled" type="checkbox" /><span>启用并启动所选 CLI</span></label>
-      </section>
-    </div>
-    <footer><span id="message">配置仅保存在本机。</span><button id="save" type="submit">保存并应用</button></footer>
+<body><main>
+  <header><div><h1>HeySure CLI 控制台</h1><p>一个网关连接 Codex、Grok 与 Antigravity，配置、登录和运行状态都在这里完成。</p></div><span id="badge" class="badge">正在读取…</span></header>
+  <nav class="top-tabs"><button type="button" data-page="heysure" class="active">① HeySure 接入</button><button type="button" data-page="gateway">② 统一 API</button><button type="button" data-page="cli">③ CLI 平台</button><button type="button" data-page="status">④ 状态与测试</button></nav>
+
+  <form id="configForm">
+    <section id="heysurePage" class="page active"><div class="layout">
+      <div class="card"><h2>HeySure 账号</h2><label>服务器地址</label><input id="server" required placeholder="http://127.0.0.1:3000"><div class="row"><div><label>账号（可选）</label><input id="account" autocomplete="username"></div><div><label>密码</label><input id="password" type="password" autocomplete="current-password" placeholder="留空保持不变"></div></div><p class="muted" style="margin-top:10px">不填写账号密码时，统一 API 仍可独立使用。</p></div>
+      <div class="card"><h2>设备身份</h2><label>稳定设备 ID</label><input id="deviceId" required><label>设备展示名称</label><input id="name" required><p class="muted" style="margin-top:12px">填写账号密码后会自动连接 HeySure；统一 API 的启停在独立栏目中管理。</p></div>
+      <div class="card span2 hero-card"><p class="hint">连接后，在 HeySure“作坊”给此设备分配 AI，并授权 <code>cli.run</code>、<code>cli.models</code>、<code>cli.status</code>。AI 可按模型自动路由，也可主动指定 CLI 平台。</p><div class="actions" style="margin-top:13px"><span id="message" class="message">保存时会验证账号并连接 HeySure</span><button type="submit" data-save-scope="heysure">保存并登录 HeySure</button></div></div>
+    </div></section>
+
+    <section id="gatewayPage" class="page"><div class="layout">
+      <div class="card hero-card"><h2>统一 OpenAI API</h2><div class="toggle"><input id="enabled" type="checkbox"><label for="enabled">启用统一 API 网关</label></div><label>访问范围</label><select id="gatewayScope"><option value="local">仅本机访问</option><option value="public">服务器 / 局域网访问</option></select><div class="row"><div><label>监听地址</label><input id="gatewayHost"></div><div><label>端口</label><input id="gatewayPort" type="number" min="1024" max="65535"></div></div><label>无法识别模型时的默认平台</label><select id="defaultPlatform"><option value="codex">Codex</option><option value="grok">Grok</option><option value="antigravity">Antigravity</option></select></div>
+      <div class="card"><h2>公网访问地址</h2><label>公网域名或 IP</label><div class="line"><input id="gatewayPublicHost" placeholder="自动使用当前页面域名/IP"><button id="detectHostBtn" type="button" class="secondary">识别并开放</button></div><label>当前 API Base URL</label><div id="gatewayUrl" class="endpoint">http://127.0.0.1:8140/v1</div><div class="actions" style="margin-top:12px"><button id="copyUrlBtn" type="button" class="secondary">复制地址</button><span id="scopeHint" class="muted"></span></div></div>
+      <div class="card span2"><h2>统一网关 API Key</h2><div class="row"><div><label>Bearer Key</label><input id="gatewayApiKey" type="password" autocomplete="new-password" placeholder="留空保持原值"></div><div><label>鉴权状态</label><div id="keyState" class="endpoint">尚未设置</div></div></div><div class="actions" style="margin-top:12px"><p class="muted">对外监听必须启用 Key。随机 Key 由本机安全生成，生成后请先复制再保存。</p><div class="line"><button id="generateKeyBtn" type="button">随机生成</button><button id="copyKeyBtn" type="button" class="secondary">复制 Key</button><button id="clearGatewayKeyBtn" type="button" class="ghost">清除</button></div></div></div>
+      <div class="card span2"><div class="actions"><div><h2 style="margin-bottom:4px">统一服务控制</h2><p>统一启停所有已启用的 CLI 子平台，并集中查看状态和日志。</p></div><span id="autostartState" class="pill">开机自启：读取中</span></div><div class="ops" style="margin-top:14px"><button type="button" data-gateway-action="start">启动统一服务</button><button type="button" data-gateway-action="stop" class="warn">停止统一服务</button><button type="button" data-gateway-action="restart">重启统一服务</button><button type="button" data-gateway-action="status" class="secondary">查看整体状态</button><button type="button" data-gateway-action="logs" class="secondary">查看聚合日志</button><button id="autostartBtn" type="button" class="secondary">开机自启：未启用</button></div></div>
+      <div class="card span2"><div class="notice">监听 <code>0.0.0.0</code> 表示接受服务器所有网卡连接，但不会自动申请公网 IP。页面会用当前访问域名/IP 生成外部地址；云服务器仍需在安全组和防火墙放行所设端口，NAT 环境还需要端口映射。</div><div class="actions" style="margin-top:13px"><span id="gatewaySaveState" class="message">只保存本栏目的统一 API 信息</span><button type="submit" data-save-scope="gateway">保存并应用统一 API</button></div></div>
+    </div></section>
+
+    <section id="cliPage" class="page"><div class="layout">
+      <div class="card span2"><h2>选择 CLI 平台</h2><div class="platform-tabs"><button type="button" data-platform="codex">Codex</button><button type="button" data-platform="grok">Grok</button><button type="button" data-platform="antigravity">Antigravity</button></div></div>
+      <div class="card"><div class="actions"><h2>平台基础设置</h2><button id="detectCliBtn" type="button" class="secondary">自动识别</button></div><div class="toggle"><input id="platformEnabled" type="checkbox"><label for="platformEnabled">在统一网关中启用此平台</label></div><label>CLI 命令或完整路径</label><input id="command" placeholder="留空使用默认命令，可自动识别"><div class="row"><div><label>默认模型</label><input id="model" placeholder="可自动识别"></div><div><label>超时（秒）</label><input id="timeoutSeconds" type="number" min="30" max="900"></div></div><label>可用模型（逗号分隔）</label><input id="models" placeholder="可从已运行后端或 CLI 自动识别"><label>CLI 工作目录</label><input id="workspace" placeholder="可自动识别当前运行目录"><label>会话与缓存目录</label><input id="sessionsDir" placeholder="可自动生成平台独立目录"><p class="muted" style="margin-top:10px">自动识别只读取本机环境，确认结果后才会写入表单。</p></div>
+      <div class="card">
+        <div id="codexSection" class="platform-section"><h2>Codex 设置</h2><label>沙箱权限</label><select id="sandbox"><option value="read-only">read-only（只读）</option><option value="workspace-write">workspace-write（可写工作区）</option><option value="danger-full-access">danger-full-access（完全访问）</option></select><p class="hint" style="margin-top:12px">建议从只读开始，确有文件修改需求时再提高权限。</p></div>
+        <div id="grokSection" class="platform-section"><h2>Grok 设置</h2><div class="row"><div><label>ACP 会话</label><select id="acpEnabled"><option value="true">启用</option><option value="false">禁用</option></select></div><div><label>xAI API Key</label><input id="xaiApiKey" type="password" placeholder="留空保持不变"></div></div><div class="row"><div><label>工具收集窗口（秒）</label><input id="toolGraceSeconds" type="number" min="0.05" max="10" step="0.05"></div><div><label>会话 TTL（秒）</label><input id="sessionTtlSeconds" type="number" min="60" max="86400"></div></div><label>最大会话数</label><input id="maxSessions" type="number" min="1" max="100"></div>
+        <div id="antigravitySection" class="platform-section"><h2>Antigravity 设置</h2><div class="row"><div><label>后端</label><select id="backend"><option value="cli">官方 agy CLI</option><option value="direct">旧 direct OAuth</option></select></div><div><label>参数安全字节数</label><input id="argSafeBytes" type="number" min="8192" max="1048576"></div></div><div id="directFields"><div class="row"><div><label>OAuth Client ID</label><input id="oauthClientId"></div><div><label>OAuth Client Secret</label><input id="oauthClientSecret" type="password" placeholder="留空保持不变"></div></div><div class="row"><div><label>OAuth 凭据文件</label><input id="authFile"></div><div><label>回调端口</label><input id="callbackPort" type="number" min="1024" max="65535"></div></div><label>API Base URLs</label><input id="baseUrls"></div></div>
+      </div>
+      <div class="card span2"><div class="actions"><div><h2 style="margin-bottom:4px">子平台配置与维护</h2><p>这里只管理当前 CLI 的安装、登录和代理；服务运行由“统一 API”栏目整体控制。</p></div><button type="submit" data-save-scope="cli">保存当前平台</button></div><div class="ops" style="margin-top:14px"><button type="button" data-job="deps" class="secondary">安装系统依赖</button><button type="button" data-job="install-cli" class="secondary">安装 / 更新 CLI</button><button type="button" data-job="login">登录 CLI</button><button type="button" data-job="login-status" class="secondary">检查登录</button><button id="proxyBtn" type="button" class="secondary">设置代理</button></div></div>
+    </div></section>
+
+    <section id="statusPage" class="page"><div class="layout">
+      <div class="card"><h2>连接状态</h2><dl class="status"><dt>HeySure Socket</dt><dd id="socketStatus">—</dd><dt>设备注册</dt><dd id="registerStatus">—</dd><dt>统一 API</dt><dd id="gatewayStatus">—</dd><dt>CLI 后端</dt><dd id="platformStatus">—</dd><dt>监听地址</dt><dd id="listenStatus">—</dd><dt>错误</dt><dd id="errorStatus">—</dd></dl><div class="actions" style="margin-top:14px"><button id="refreshStatusBtn" type="button" class="secondary">刷新状态</button><button id="currentJobBtn" type="button" class="secondary">查看当前作业</button></div></div>
+      <div class="card"><h2>网关日志</h2><div id="logs" class="output">暂无日志</div></div>
+      <div class="card span2"><h2>模型与调用测试</h2><div class="actions"><p>测试请求会通过统一 API 自动路由到相应 CLI。</p><button id="modelsBtn" type="button" class="secondary">刷新模型</button></div><label>测试模型</label><select id="testModel"><option value="">统一网关默认模型</option></select><label>提示词</label><textarea id="testPrompt">只回复：CLI 连接正常</textarea><div class="actions"><span class="muted">真实调用可能消耗对应模型额度。</span><button id="testBtn" type="button">运行测试</button></div><div id="testOutput" class="output">尚未测试</div></div>
+    </div></section>
   </form>
-  <section class="card" style="margin-top:16px">
-    <h2>运行状态</h2>
-    <dl class="status">
-      <dt>HeySure Socket</dt><dd id="socketStatus">—</dd>
-      <dt>设备注册</dt><dd id="registerStatus">—</dd>
-      <dt>CLI 网关</dt><dd id="gatewayStatus">—</dd>
-      <dt>当前平台 / 模型</dt><dd id="platformStatus">—</dd>
-      <dt>错误</dt><dd id="errorStatus">—</dd>
-    </dl>
-    <p class="hint">上线后仍需在 HeySure“作坊”里给此设备<strong>分配 AI 成员</strong>，并在 MCP 权限中勾选 <code>cli.run</code>、<code>cli.models</code>、<code>cli.status</code>。之后 AI 才能主动控制本机 CLI。</p>
-  </section>
 </main>
+
+<div id="modalBackdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal"><div class="modal-head"><div><h2 id="modalTitle">操作</h2><p id="modalSubtitle"></p></div><button id="modalCloseBtn" type="button" class="ghost modal-close">关闭</button></div><div id="modalBody" class="modal-body"></div></div></div>
+<div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
 <script>
-  const $ = id => document.getElementById(id)
-  const form = $('form'), message = $('message'), save = $('save')
-  function platform() { return new FormData(form).get('platform') }
-  function platformUi() {
-    $('sandboxWrap').style.display = platform() === 'codex' ? '' : 'none'
-    $('command').placeholder = `留空使用 ${platform() === 'antigravity' ? 'agy' : platform()} 默认命令`
-  }
-  document.querySelectorAll('[name=platform]').forEach(x => x.addEventListener('change', platformUi))
-  async function loadConfig() {
-    const c = await fetch('/api/config').then(r => r.json())
-    for (const key of ['server','account','deviceId','name','command','model','workspace','timeoutSeconds','sandbox']) if ($(key)) $(key).value = c[key] ?? ''
-    const radio = document.querySelector(`[name=platform][value="${c.platform}"]`); if (radio) radio.checked = true
-    $('password').placeholder = c.passwordConfigured ? '已保存；留空保持不变' : '请输入 HeySure 密码'
-    $('enabled').checked = !!c.enabled
-    platformUi()
-  }
-  async function loadStatus() {
-    try {
-      const s = await fetch('/api/status').then(r => r.json()), g = s.gateway || {}
-      $('socketStatus').textContent = s.heysureConnected ? '已连接' : '未连接'
-      $('registerStatus').textContent = s.registered ? `已注册（${s.deviceId}）` : '未注册'
-      $('gatewayStatus').textContent = g.ready ? '已就绪' : (g.enabled ? '未就绪' : '未启用')
-      $('platformStatus').textContent = `${g.platform || '—'} / ${g.model || '—'}`
-      $('errorStatus').textContent = g.error || '—'
-      $('badge').textContent = s.registered && g.ready ? '全部就绪' : '等待配置或连接'
-      $('badge').className = 'badge' + (s.registered && g.ready ? ' ok' : '')
-    } catch { $('badge').textContent = '状态读取失败' }
-  }
-  form.addEventListener('submit', async e => {
-    e.preventDefault(); save.disabled = true; message.className = ''; message.textContent = '正在保存并启动…'
-    const fd = new FormData(form), payload = Object.fromEntries(fd.entries())
-    payload.timeoutSeconds = Number(payload.timeoutSeconds); payload.enabled = $('enabled').checked
-    try {
-      const res = await fetch('/api/config', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
-      const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || '保存失败')
-      $('password').value = ''; $('password').placeholder = '已保存；留空保持不变'
-      message.textContent = '已保存并应用'; setTimeout(loadStatus, 500)
-    } catch (err) { message.className = 'error'; message.textContent = err.message }
-    finally { save.disabled = false }
-  })
-  Promise.all([loadConfig(), loadStatus()]).catch(err => { message.className='error'; message.textContent=err.message })
-  setInterval(loadStatus, 3000)
-</script>
-</body>
-</html>
+const $=id=>document.getElementById(id);const commonProfileKeys=['platformEnabled','command','model','models','workspace','sessionsDir','timeoutSeconds','proxyUrl','noProxy'],platformProfileKeys={codex:['sandbox'],grok:['acpEnabled','toolGraceSeconds','sessionTtlSeconds','maxSessions','xaiApiKey'],antigravity:['backend','argSafeBytes','authFile','callbackPort','oauthClientId','oauthClientSecret','baseUrls']};const profileKeysFor=name=>[...commonProfileKeys,...platformProfileKeys[name]];let config=null,current='codex',autostart=false,jobTimer=null,loginWindow=null,loginNavigated=false;
+function value(id){const e=$(id);if(!e)return undefined;if(e.type==='checkbox')return e.checked;if(e.type==='number')return e.value===''?'':Number(e.value);if(id==='acpEnabled')return e.value==='true';return e.value}
+function toast(text,type='ok'){const node=document.createElement('div');node.className=`toast ${type}`;node.textContent=text;$('toastStack').append(node);setTimeout(()=>node.remove(),4200)}
+async function apiJson(path,options){let response;try{response=await fetch(path,{cache:'no-store',credentials:'same-origin',...options})}catch{throw new Error(`无法连接 CLI 管理服务（${location.origin}）。请执行 bash run.sh status，并确认管理端口已放行。`)}let data;try{data=await response.json()}catch{throw new Error(`CLI 管理服务返回了无效响应（HTTP ${response.status}）`)}if(!response.ok||data.ok===false)throw new Error(data.error||`请求失败（HTTP ${response.status}）`);return data}
+function capture(){if(!config)return;const p=config.profiles[current]||(config.profiles[current]={});for(const key of profileKeysFor(current)){const v=value(key);if(v!==undefined)p[key]=v}for(const key of ['gatewayHost','gatewayPort','gatewayPublicHost','gatewayApiKey','defaultPlatform'])config[key]=value(key);if($('gatewayApiKey').value)config.gatewayApiKeyClear=false}
+function showPage(name){document.querySelectorAll('.top-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.page===name));document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===`${name}Page`))}
+document.querySelectorAll('.top-tabs button').forEach(b=>b.onclick=()=>showPage(b.dataset.page));
+function loadProfile(name,skip=false){if(!skip)capture();current=name;const p=config.profiles[name]||{};for(const key of profileKeysFor(name)){const e=$(key);if(!e)continue;let v=p[key]??'';if(key==='acpEnabled')v=String(v!==false);if(e.type==='checkbox')e.checked=!!v;else e.value=v}document.querySelectorAll('.platform-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.platform===name));document.querySelectorAll('.platform-section').forEach(s=>s.classList.remove('active'));$(`${name}Section`).classList.add('active');$('directFields').style.display=name==='antigravity'&&p.backend==='direct'?'':'none';for(const key of platformProfileKeys[name].filter(x=>['xaiApiKey','oauthClientSecret'].includes(x)))if($(key))$(key).placeholder=p[`${key}Configured`]?'已保存；留空保持不变':'留空表示未设置'}
+document.querySelectorAll('.platform-tabs button').forEach(b=>b.onclick=()=>loadProfile(b.dataset.platform));$('backend').onchange=()=>{$('directFields').style.display=$('backend').value==='direct'?'':'none'};
+function isLocalHost(host){return !host||['127.0.0.1','localhost','::1'].includes(host)}
+function urlHost(host){return host.includes(':')&&!host.startsWith('[')?`[${host}]`:host}
+function refreshGatewayUrl(){if(!config)return;const bind=$('gatewayHost').value||'127.0.0.1',publicMode=$('gatewayScope').value==='public';let host=publicMode?$('gatewayPublicHost').value.trim():'';if(!host&&publicMode&&!isLocalHost(location.hostname))host=location.hostname;if(!host)host=bind==='0.0.0.0'?'服务器公网IP':bind;const url=`http://${urlHost(host)}:${$('gatewayPort').value||8140}/v1`;$('gatewayUrl').textContent=url;$('scopeHint').textContent=publicMode?'监听所有网卡，请确认端口已放行':'只允许服务器本机调用';$('keyState').textContent=config.gatewayApiKeyConfigured||$('gatewayApiKey').value?'已启用 Bearer 鉴权':'未设置（仅允许本机模式）'}
+function applyScope(){const publicMode=$('gatewayScope').value==='public';$('gatewayHost').value=publicMode?'0.0.0.0':'127.0.0.1';refreshGatewayUrl()}
+async function loadConfig(){config=await apiJson('/api/config');for(const key of ['server','account','deviceId','name'])$(key).value=config[key]||'';for(const key of ['gatewayHost','gatewayPort','gatewayPublicHost','defaultPlatform'])$(key).value=config[key]??'';$('password').value='';$('password').placeholder=config.passwordConfigured?'已保存；留空保持不变':'请输入密码';$('gatewayApiKey').value='';$('gatewayApiKey').placeholder=config.gatewayApiKeyConfigured?'已保存；留空保持不变':'点击随机生成';$('enabled').checked=!!config.enabled;$('gatewayScope').value=isLocalHost(config.gatewayHost)?'local':'public';current=config.platform||'codex';loadProfile(current,true);refreshGatewayUrl()}
+function savePayload(scope){if(scope==='heysure')return{server:value('server'),account:value('account'),password:value('password'),deviceId:value('deviceId'),name:value('name')};if(scope==='gateway')return{enabled:value('enabled'),gatewayHost:config.gatewayHost,gatewayPort:config.gatewayPort,gatewayPublicHost:config.gatewayPublicHost,gatewayApiKey:config.gatewayApiKey,gatewayApiKeyClear:config.gatewayApiKeyClear,defaultPlatform:config.defaultPlatform};const source=config.profiles[current],selected={};for(const key of [...profileKeysFor(current),'proxyUrlClear','xaiApiKeyClear','oauthClientSecretClear'])if(key in source)selected[key]=source[key];return{platform:current,profiles:{[current]:selected}}}
+function mergeSavedConfig(scope,saved,draft){if(scope==='heysure'){for(const key of ['server','account','deviceId','name','passwordConfigured'])draft[key]=saved[key]}else if(scope==='gateway'){for(const key of ['enabled','gatewayHost','gatewayPort','gatewayPublicHost','gatewayApiKey','gatewayApiKeyConfigured','defaultPlatform'])draft[key]=saved[key];delete draft.gatewayApiKeyClear}else{draft.platform=current;draft.profiles[current]=saved.profiles[current]}return draft}
+async function saveConfig({quiet=false,scope='cli'}={}){capture();const draft=JSON.parse(JSON.stringify(config)),payload=savePayload(scope),data=await apiJson('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});config=mergeSavedConfig(scope,data.config,draft);if(scope==='heysure')$('password').value='';if(scope==='gateway')$('gatewayApiKey').value='';if(scope==='cli')loadProfile(current,true);refreshGatewayUrl();if(!quiet)toast({heysure:'HeySure 接入设置已保存',gateway:'统一 API 设置已保存并应用',cli:`${current} 平台设置已保存`}[scope]);return data}
+$('configForm').onsubmit=async event=>{event.preventDefault();const button=event.submitter,active=document.querySelector('.page.active')?.id||'',scope=button?.dataset.saveScope||(active==='heysurePage'?'heysure':active==='gatewayPage'?'gateway':'cli');if(button)button.disabled=true;try{await saveConfig({scope});if(scope==='heysure'){const result=await action('heysure-login');$('message').className='message';$('message').textContent=`HeySure 登录成功，Socket：${result.socketUrl}`;toast('HeySure 账号验证成功，正在连接设备 Socket')}if(scope==='gateway')$('gatewaySaveState').textContent='统一 API 设置已保存并重新加载';setTimeout(loadStatus,350)}catch(error){toast(error.message,'error');if(scope==='heysure'){$('message').textContent=error.message;$('message').className='message error'}if(scope==='gateway')$('gatewaySaveState').textContent=error.message}finally{if(button)button.disabled=false}};
+async function action(name,extra={}){const data=await apiJson('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:name,...extra})});return data.result}
+function openModal(title,subtitle=''){clearInterval(jobTimer);$('modalTitle').textContent=title;$('modalSubtitle').textContent=subtitle;$('modalBody').replaceChildren();$('modalBackdrop').classList.remove('hidden')}
+function closeModal(){$('modalBackdrop').classList.add('hidden');clearInterval(jobTimer);jobTimer=null}
+$('modalCloseBtn').onclick=closeModal;$('modalBackdrop').onclick=e=>{if(e.target===$('modalBackdrop'))closeModal()};document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+function operationView(){const state=document.createElement('div');state.className='modal-state';state.innerHTML='<span class="dot busy"></span><span>正在处理…</span>';const output=document.createElement('div');output.className='output';output.textContent='请稍候';const links=document.createElement('div');links.className='links';const actions=document.createElement('div');actions.className='modal-actions';$('modalBody').append(state,output,links,actions);return{state,output,links,actions}}
+function setModalState(view,text,type='busy'){view.state.querySelector('.dot').className=`dot ${type}`;view.state.querySelector('span:last-child').textContent=text}
+function renderLinks(view,logs){view.links.replaceChildren();const urls=[...new Set((logs.join('\n').match(/https?:\/\/[^\s<>"']+/g)||[]).map(x=>x.replace(/[),.;]+$/,'')))];for(const url of urls){const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.textContent='打开登录 / 授权页面';view.links.append(link)}if(urls[0]&&loginWindow&&!loginNavigated){try{loginWindow.location.href=urls[0];loginNavigated=true;toast('已在新页面打开登录地址')}catch{loginWindow=null}}}
+async function pollJob(view){try{const job=await action('job-status');view.output.textContent=(job.logs||[]).join('\n')||(job.action?'等待 CLI 输出…':'当前没有运行中的作业');view.output.scrollTop=view.output.scrollHeight;renderLinks(view,job.logs||[]);if(!job.action)setModalState(view,'当前没有作业','ok');else setModalState(view,job.running?'CLI 正在运行':job.exitCode===0?'操作已完成':`操作结束，退出码 ${job.exitCode}`,job.running?'busy':job.exitCode===0?'ok':'error');if(!job.running){clearInterval(jobTimer);if(loginWindow&&!loginNavigated){loginWindow.close();loginWindow=null}loadStatus()}}catch(error){setModalState(view,error.message,'error')}}
+async function startJob(name,title){if(name==='login'){loginNavigated=false;loginWindow=window.open('about:blank','heysure-cli-login');if(loginWindow)loginWindow.document.write('<title>等待 CLI 登录地址</title><p style="font-family:sans-serif;padding:24px">正在等待 CLI 生成登录地址…</p>');else toast('浏览器阻止了新窗口，稍后可点击弹窗中的登录链接','error')}else{loginWindow=null}openModal(title,`${current} · 输出会实时更新`);const view=operationView();const input=document.createElement('input');input.placeholder='授权码、确认内容或菜单选项';const send=document.createElement('button');send.textContent='发送输入';send.onclick=async()=>{try{await action('job-input',{input:input.value});input.value='';toast('输入已发送')}catch(error){toast(error.message,'error')}};const stop=document.createElement('button');stop.className='warn';stop.textContent='终止作业';stop.onclick=async()=>{await action('job-stop');pollJob(view)};view.actions.append(input,send,stop);try{await saveConfig({quiet:true,scope:'cli'});await action(name);await pollJob(view);jobTimer=setInterval(()=>pollJob(view),800)}catch(error){setModalState(view,error.message,'error');view.output.textContent=error.message;if(loginWindow&&!loginNavigated)loginWindow.close()}}
+document.querySelectorAll('[data-job]').forEach(button=>button.onclick=()=>startJob(button.dataset.job,button.textContent.trim()));
+async function detectCliConfig(){capture();openModal(`${current} 配置自动识别`,'读取本机 CLI、运行后端和推荐目录，不会立即修改已保存设置');const view=operationView();try{const result=await action('detect-cli-config',{platform:current,profile:config.profiles[current]}),v=result.values||{},d=result.detected||{},warnings=result.warnings||[];const lines=[`CLI 命令：${v.command||'未识别'}`,`CLI 版本：${d.version||'未识别'}`,`默认模型：${v.model||'未识别'}`,`模型来源：${d.modelSource||'未识别'}（${d.modelCount||0} 个）`,`超时：${v.timeoutSeconds} 秒`,`工作目录：${v.workspace||'未识别'}`,`会话目录：${v.sessionsDir||'未识别'}`,`模型列表：${v.models||'未识别'}`];if(warnings.length)lines.push('',...warnings.map(x=>`提示：${x}`));view.output.textContent=lines.join('\n');setModalState(view,warnings.length?'识别完成，部分项目使用推荐值':'识别完成','ok');const apply=document.createElement('button');apply.textContent='应用识别结果';apply.onclick=()=>{for(const [key,val] of Object.entries(v)){const input=$(key);if(input)input.value=val;config.profiles[current][key]=val}capture();toast(`${current} 自动识别结果已填入，请保存设置`);closeModal()};const retry=document.createElement('button');retry.className='secondary';retry.textContent='重新识别';retry.onclick=detectCliConfig;view.actions.append(retry,apply)}catch(error){setModalState(view,error.message,'error');view.output.textContent=error.message;toast(error.message,'error')}}
+$('detectCliBtn').onclick=detectCliConfig;
+async function runGatewayOperation(name,title){openModal(title,'统一 API · 所有已启用的 CLI 子平台');const view=operationView();try{let result;if(name==='start'){$('enabled').checked=true;await saveConfig({quiet:true,scope:'gateway'});result=await action('start')}else if(name==='stop'){result=await action('stop');$('enabled').checked=false;config.enabled=false}else if(name==='restart'){await saveConfig({quiet:true,scope:'gateway'});result=await action('restart')}else result=await action(name);setModalState(view,'操作成功','ok');view.output.textContent=typeof result==='string'?result:JSON.stringify(result,null,2);toast(`${title}成功`);loadStatus()}catch(error){setModalState(view,error.message,'error');view.output.textContent=error.message;toast(error.message,'error')}}
+const gatewayActionTitles={start:'启动统一服务',stop:'停止统一服务',restart:'重启统一服务',status:'统一服务状态',logs:'统一服务日志'};document.querySelectorAll('[data-gateway-action]').forEach(button=>button.onclick=()=>runGatewayOperation(button.dataset.gatewayAction,gatewayActionTitles[button.dataset.gatewayAction]||button.textContent.trim()));
+function openProxy(){const p=config.profiles[current];openModal(`${current} 代理设置`,'代理仅对当前 CLI 平台生效');const wrap=document.createElement('div');wrap.innerHTML='<label>代理 URL</label><input id="modalProxy" type="password" placeholder="如 http://127.0.0.1:7890；留空保持不变"><label>NO_PROXY</label><input id="modalNoProxy"><p class="hint" style="margin-top:12px">代理地址可能包含密码，因此保存后不会回显。</p><div class="modal-actions"><button id="modalProxyClear" type="button" class="ghost">清除代理</button><button id="modalProxyTest" type="button" class="secondary">保存并测试</button><button id="modalProxyApply" type="button">保存并应用</button></div>';$('modalBody').append(wrap);$('modalNoProxy').value=p.noProxy||'localhost,127.0.0.1,::1';$('modalProxy').placeholder=p.proxyUrlConfigured?'已保存；留空保持不变':'如 http://127.0.0.1:7890';const collect=()=>{const entered=$('modalProxy').value;if(entered){p.proxyUrl=entered;p.proxyUrlClear=false}p.noProxy=$('modalNoProxy').value};$('modalProxyApply').onclick=async()=>{try{collect();await saveConfig({quiet:true,scope:'cli'});toast('代理已保存并应用到当前子平台');closeModal()}catch(error){toast(error.message,'error')}};$('modalProxyTest').onclick=async()=>{try{collect();await saveConfig({quiet:true,scope:'cli'});const result=await action('proxy-test');toast(`代理测试成功（HTTP ${result.status}）`)}catch(error){toast(error.message,'error')}};$('modalProxyClear').onclick=async()=>{try{p.proxyUrl='';p.proxyUrlClear=true;p.proxyUrlConfigured=false;await saveConfig({quiet:true,scope:'cli'});toast('当前子平台代理已清除');closeModal()}catch(error){toast(error.message,'error')}}}
+$('proxyBtn').onclick=openProxy;
+async function loadStatus(){try{const s=await apiJson('/api/status'),g=s.gateway||{},ps=g.platforms||{},summary=Object.entries(ps).map(([name,state])=>`${name}: ${state.ready?'就绪':state.enabled?'异常':'停用'}`).join(' · ');$('socketStatus').textContent=s.heysureConnected?'已连接':s.heysureConnectionState||'未连接';$('registerStatus').textContent=s.registered?`已注册（${s.deviceId}）`:'未注册';$('gatewayStatus').textContent=g.ready?'已就绪':g.enabled?'等待后端':'已停止';$('platformStatus').textContent=summary||'—';$('listenStatus').textContent=`${g.listenHost||'—'}:${g.listenPort||'—'}${g.exposeEnabled?'（外部访问）':'（仅本机）'}`;$('errorStatus').textContent=s.heysureError||g.error||'—';$('logs').textContent=(g.recentLogs||[]).join('\n')||'暂无日志';const allGood=s.registered&&g.ready;$('badge').textContent=allGood?'HeySure 与网关已就绪':g.ready?'统一 API 已就绪':'等待配置';$('badge').className=`badge${g.ready?' ok':''}`}catch(error){$('badge').textContent='管理服务连接失败';$('errorStatus').textContent=error.message}}
+$('refreshStatusBtn').onclick=async()=>{await loadStatus();toast('状态已刷新')};$('currentJobBtn').onclick=()=>{openModal('当前安装 / 登录作业',`${current} · 实时输出`);const view=operationView();pollJob(view);jobTimer=setInterval(()=>pollJob(view),800)};
+$('modelsBtn').onclick=async()=>{const button=$('modelsBtn');button.disabled=true;try{const result=await action('models'),select=$('testModel');select.replaceChildren(new Option('统一网关默认模型',''));for(const item of result.data||[])if(item.id)select.add(new Option(`[${item.cli_platform||'auto'}] ${item.id}`,item.id));$('testOutput').textContent=JSON.stringify(result,null,2);toast(`已加载 ${(result.data||[]).length} 个模型`)}catch(error){toast(error.message,'error');$('testOutput').textContent=error.message}finally{button.disabled=false}};
+$('testBtn').onclick=async()=>{const button=$('testBtn');button.disabled=true;$('testOutput').textContent='正在调用统一 API…';try{const result=await action('test',{prompt:value('testPrompt'),model:value('testModel')});$('testOutput').textContent=result.choices?.[0]?.message?.content||JSON.stringify(result,null,2);toast('模型调用成功')}catch(error){$('testOutput').textContent=error.message;toast(error.message,'error')}finally{button.disabled=false}};
+$('gatewayScope').onchange=applyScope;$('gatewayHost').oninput=refreshGatewayUrl;$('gatewayPort').oninput=refreshGatewayUrl;$('gatewayPublicHost').oninput=refreshGatewayUrl;
+async function detectAndExpose(){const button=$('detectHostBtn'),typed=$('gatewayPublicHost').value.trim(),detected=!isLocalHost(location.hostname)?location.hostname:'',host=typed||detected;if(!host)return toast('当前通过本机地址访问，无法判断 NAT 后的公网 IP；请先填写服务器公网 IP 或域名','error');button.disabled=true;const oldText=button.textContent;button.textContent='正在开放…';let generatedKey='';try{$('gatewayPublicHost').value=host;$('gatewayScope').value='public';$('enabled').checked=true;applyScope();if(!config.gatewayApiKeyConfigured&&!$('gatewayApiKey').value){const result=await action('generate-api-key');generatedKey=result.apiKey;$('gatewayApiKey').value=generatedKey;config.gatewayApiKeyClear=false;await copyText(generatedKey)}await saveConfig({quiet:true,scope:'gateway'});if(generatedKey)$('gatewayApiKey').value=generatedKey;refreshGatewayUrl();$('gatewaySaveState').textContent='公网地址已识别，统一 API 已启用并切换为对外监听';toast(`已开放 ${host}:${$('gatewayPort').value}${generatedKey?'；随机 API Key 已复制':''}`);setTimeout(loadStatus,350)}catch(error){toast(error.message,'error');$('gatewaySaveState').textContent=error.message}finally{button.disabled=false;button.textContent=oldText}}
+$('detectHostBtn').onclick=detectAndExpose;
+async function copyText(text){if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);return}const area=document.createElement('textarea');area.value=text;area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();document.execCommand('copy');area.remove()}
+$('generateKeyBtn').onclick=async()=>{try{const result=await action('generate-api-key');$('gatewayApiKey').value=result.apiKey;config.gatewayApiKeyClear=false;refreshGatewayUrl();await copyText(result.apiKey);toast('已生成并复制随机 API Key，请保存设置')}catch(error){toast(error.message,'error')}};
+$('copyKeyBtn').onclick=async()=>{try{const key=$('gatewayApiKey').value;if(!key)return toast('已保存的 Key 不会回显；请重新生成后复制','error');await copyText(key);toast('API Key 已复制')}catch(error){toast(error.message,'error')}};$('copyUrlBtn').onclick=async()=>{try{await copyText($('gatewayUrl').textContent);toast('API 地址已复制')}catch(error){toast(error.message,'error')}};
+$('clearGatewayKeyBtn').onclick=()=>{$('gatewayApiKey').value='';config.gatewayApiKey='';config.gatewayApiKeyConfigured=false;config.gatewayApiKeyClear=true;refreshGatewayUrl();toast('API Key 已标记清除，保存后生效')};
+$('autostartBtn').onclick=async()=>{try{const status=await action('autostart',{mode:'status'});const result=await action('autostart',{mode:status.enabled?'off':'on'});autostart=!!result.enabled;$('autostartBtn').textContent=`开机自启：${autostart?'已启用':'未启用'}`;$('autostartState').textContent=`开机自启：${autostart?'已启用':'未启用'}`;$('autostartState').className=`pill${autostart?' ok':''}`;toast(`统一服务开机自启已${autostart?'启用':'关闭'}`)}catch(error){toast(error.message,'error')}};
+Promise.all([loadConfig(),loadStatus(),action('autostart',{mode:'status'}).then(result=>{autostart=!!result.enabled;$('autostartBtn').textContent=`开机自启：${autostart?'已启用':'未启用'}`;$('autostartState').textContent=`开机自启：${autostart?'已启用':'未启用'}`;$('autostartState').className=`pill${autostart?' ok':''}`}).catch(()=>{$('autostartState').textContent='开机自启：状态未知'})]).catch(error=>toast(error.message,'error'));setInterval(loadStatus,3000);
+</script></body></html>

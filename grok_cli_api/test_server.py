@@ -1,8 +1,14 @@
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
-import acp_bridge
-import server
+CLI_ROOT = Path(__file__).resolve().parents[1]
+if str(CLI_ROOT) not in sys.path:
+    sys.path.insert(0, str(CLI_ROOT))
+
+from cli_gateway.backends import grok_acp as acp_bridge
+from cli_gateway.backends import grok as server
 
 
 class StatefulAcpHelpersTest(unittest.TestCase):

@@ -1375,6 +1375,27 @@ cmd_restart() {
   cmd_start
 }
 
+cmd_login_status() {
+  load_optional_env
+  export_defaults
+  if ! cmd="$(resolve_grok 2>/dev/null)"; then
+    err "未找到 grok CLI，请先执行：$0 install-cli"
+    return 1
+  fi
+  export GROK_CLI_COMMAND="$cmd"
+  if is_logged_in; then
+    if [[ -n "${XAI_API_KEY:-}" ]]; then
+      echo "Login    : OK (XAI_API_KEY)"
+    else
+      echo "Login    : OK"
+    fi
+    return 0
+  fi
+  echo "Login    : 未登录"
+  echo "请执行：$0 login"
+  return 1
+}
+
 cmd_status() {
   load_optional_env
   export_defaults
@@ -1522,6 +1543,7 @@ usage() {
   deps          安装系统依赖（python3 / curl）
   install-cli   安装或更新官方 grok CLI
   login         检查登录；未登录则引导 login 或填写 XAI_API_KEY
+  login-status  只检查 grok CLI 是否已经登录
   proxy         配置系统 HTTP/HTTPS/SOCKS 代理（网址 + 端口）
     proxy set --host HOST --port PORT [--scheme http|socks5]
     proxy set --url http://HOST:PORT
@@ -1567,6 +1589,7 @@ main() {
     deps|install-deps) shift || true; cmd_deps "$@" ;;
     install-cli|install_cli|cli) shift || true; cmd_install_cli "$@" ;;
     login|auth)   shift || true; cmd_login "$@" ;;
+    login-status|auth-status) shift || true; cmd_login_status "$@" ;;
     proxy|proxies) shift || true; cmd_proxy "$@" ;;
     expose|open)  shift || true; cmd_expose "$@" ;;
     autostart|boot|service) shift || true; cmd_autostart "$@" ;;

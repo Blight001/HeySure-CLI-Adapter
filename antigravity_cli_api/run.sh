@@ -715,7 +715,7 @@ usage() {
   deps                 检查并自动安装 Python 3 / curl（不需要 Node.js）
   install-cli          安装或更新 Google 官方 Antigravity CLI (agy)
   login                直接运行 agy 登录 Google（凭据保存在运行用户本地）
-  auth-status          用 agy models 检查登录并显示账号可用模型
+  login-status         检查登录并显示账号可用模型（auth-status 别名）
   config               生成/显示 HeySure 要填写的模型、URL 和本地 API Key
   proxy <url>|clear    配置或清除代理
   expose               对外开放（0.0.0.0 + 强制网关密钥）/ 收回本机监听
@@ -766,7 +766,7 @@ case "${1:-}" in
   deps) cmd_deps ;;
   install-cli|install_cli|install) cmd_install_cli ;;
   login) cmd_login ;;
-  auth-status) cmd_auth_status ;;
+  login-status|auth-status) cmd_auth_status ;;
   config) cmd_config ;;
   proxy) shift; cmd_proxy "$@" ;;
   expose|open) shift || true; cmd_expose "$@" ;;
