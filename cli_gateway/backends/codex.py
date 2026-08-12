@@ -277,13 +277,29 @@ class CodexGateway:
             state_path = os.path.join(root, "state.json")
             state = _load_json(state_path)
             current_hash = _history_hash(messages)
-            if state.get("request_hash") == current_hash and isinstance(state.get("response"), dict):
+            history_mode = str(payload.get("_heysure_history_mode") or "").strip().lower()
+            context_revision = str(payload.get("_heysure_context_revision") or "").strip()
+            previous_revision = str(state.get("context_revision") or "").strip()
+            revision_changed = bool(
+                context_revision not in ("", "0")
+                and context_revision != previous_revision
+            )
+            replace_context = history_mode == "replace" or revision_changed
+            if (
+                not replace_context
+                and state.get("request_hash") == current_hash
+                and isinstance(state.get("response"), dict)
+            ):
                 cached = copy.deepcopy(state["response"])
                 cached["cached"] = True
                 return cached
 
             previous = state.get("messages") if isinstance(state.get("messages"), list) else []
-            can_resume = bool(state.get("thread_id")) and _is_prefix(previous, messages)
+            can_resume = (
+                not replace_context
+                and bool(state.get("thread_id"))
+                and _is_prefix(previous, messages)
+            )
             generation = int(state.get("generation") or 0)
             if not can_resume:
                 generation += 1
@@ -309,6 +325,7 @@ class CodexGateway:
                 "messages": messages + [{"role": "assistant", "content": answer}],
                 "request_hash": current_hash,
                 "response": response,
+                "context_revision": context_revision or previous_revision,
                 "updated_at": int(time.time()),
             })
             return response
@@ -394,6 +411,12 @@ class Handler(BaseHTTPRequestHandler):
             session_header = self.headers.get("X-HeySure-Session-ID", "").strip()
             if session_header:
                 payload["_heysure_session_id"] = session_header
+            history_mode = self.headers.get("X-HeySure-History-Mode", "").strip().lower()
+            if history_mode:
+                payload["_heysure_history_mode"] = history_mode
+            context_revision = self.headers.get("X-HeySure-Context-Revision", "").strip()
+            if context_revision:
+                payload["_heysure_context_revision"] = context_revision
             completion = GATEWAY.complete(payload)
             if not payload.get("stream"):
                 self._json(200, completion)

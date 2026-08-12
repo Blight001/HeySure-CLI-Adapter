@@ -151,6 +151,60 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         )
         registry.drop(created[0])
 
+    def test_context_revision_drops_old_session_and_replays_compressed_history(self):
+        registry = acp_bridge.SessionRegistry(ttl=60, max_sessions=3)
+        handler = object.__new__(server.Handler)
+        created = []
+
+        def fake_create(**kwargs):
+            token = f"{len(created) + 1:08x}"
+            sess = acp_bridge.AcpSession(token, "grok-4.5")
+            sess.prompts = []
+            sess.start_turn = sess.prompts.append
+            kwargs["registry"].add(sess)
+            created.append(sess)
+            return sess
+
+        def fake_blocking(this, sess, _model, _preview, request_state):
+            this._remember_acp_response(
+                sess,
+                request_state,
+                {"role": "assistant", "content": "answer"},
+                "stop",
+            )
+            this._acp_park(sess)
+
+        tools = [{
+            "type": "function",
+            "function": {"name": "demo", "parameters": {"type": "object"}},
+        }]
+        first = [{"role": "user", "content": "原问题"}]
+        compressed = [
+            {"role": "system", "content": "历史摘要：代号青鸟"},
+            {"role": "user", "content": "代号是什么？"},
+        ]
+        with mock.patch.object(server, "ACP_REGISTRY", registry), mock.patch.object(
+            server, "_resolve_cli_argv", return_value=["grok"]
+        ), mock.patch.object(
+            acp_bridge.AcpSession, "create", side_effect=fake_create
+        ), mock.patch.object(
+            server.Handler, "_acp_blocking", fake_blocking
+        ):
+            handler._handle_acp_chat(
+                "grok-4.5", first, tools, False, "first", "stable-chat", None,
+                "full", "0",
+            )
+            handler._handle_acp_chat(
+                "grok-4.5", compressed, tools, False, "compressed", "stable-chat", None,
+                "full", "revision-2",
+            )
+
+        self.assertEqual(len(created), 2)
+        self.assertTrue(created[0].closed)
+        self.assertIn("历史摘要：代号青鸟", created[1].prompts[0])
+        self.assertEqual(created[1].context_revision, "revision-2")
+        registry.drop(created[1])
+
 
 class HandlerDisconnectTest(unittest.TestCase):
     def test_mcp_client_disconnect_does_not_escape_request_handler(self):

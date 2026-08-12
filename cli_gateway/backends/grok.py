@@ -877,7 +877,9 @@ class Handler(BaseHTTPRequestHandler):
 
         tools = payload.get("tools")
         use_acp = Config.acp_enabled and isinstance(tools, list) and bool(tools)
-        session_identity = str(
+        history_mode = self.headers.get("X-HeySure-History-Mode", "").strip().lower()
+        context_revision = self.headers.get("X-HeySure-Context-Revision", "").strip()
+        session_identity = "" if history_mode == "stateless" else str(
             self.headers.get("X-HeySure-Session-ID", "") or payload.get("user") or ""
         ).strip()
 
@@ -892,6 +894,8 @@ class Handler(BaseHTTPRequestHandler):
                     prompt_preview,
                     session_identity,
                     payload.get("tool_choice"),
+                    history_mode,
+                    context_revision,
                 )
             elif stream:
                 self._handle_stream(model, messages, prompt_preview)
@@ -1091,6 +1095,8 @@ class Handler(BaseHTTPRequestHandler):
         prompt_preview: str,
         session_identity: str,
         tool_choice: Any,
+        history_mode: str = "",
+        context_revision: str = "",
     ) -> None:
         os.makedirs(RUNTIME_DIR, exist_ok=True)
         tools_registry = acp_bridge.tools_registry_from_payload(tools)
@@ -1103,6 +1109,19 @@ class Handler(BaseHTTPRequestHandler):
             "tools": tools,
             "tool_choice": tool_choice,
         })
+
+        # HeySure 压缩会重写历史。上下文版本变化时必须关闭旧原生会话，
+        # 并用本次上传的摘要 + 最近消息全量创建新会话。
+        if session_identity:
+            current = ACP_REGISTRY.get_by_identity(session_identity)
+            previous_revision = str(getattr(current, "context_revision", "") or "")
+            revision_changed = bool(
+                current is not None
+                and context_revision not in ("", "0")
+                and context_revision != previous_revision
+            )
+            if current is not None and (history_mode == "replace" or revision_changed):
+                ACP_REGISTRY.drop(current)
 
         # 恢复路径：tool_call id 里的会话 token 命中且挂起调用齐全 → 作答续跑。
         sess = None
@@ -1191,6 +1210,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if session_identity:
                 ACP_REGISTRY.bind_identity(sess, session_identity)
+            sess.context_revision = context_revision
             sess.adopt_temp_paths(temp_paths)
             sess.start_turn(prompt_text)
 

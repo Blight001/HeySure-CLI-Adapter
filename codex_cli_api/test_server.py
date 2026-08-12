@@ -109,6 +109,29 @@ class CodexGatewayTests(unittest.TestCase):
         self.assertNotIn("resume", run.call_args_list[1].args[0])
         self.assertNotEqual(run.call_args_list[0].kwargs["cwd"], run.call_args_list[1].kwargs["cwd"])
 
+    def test_context_revision_forces_new_thread_with_full_compressed_history(self):
+        gateway = server.CodexGateway()
+        first = {
+            "user": "session-compress",
+            "_heysure_history_mode": "full",
+            "_heysure_context_revision": "0",
+            "messages": [{"role": "user", "content": "原问题"}],
+        }
+        compressed = {
+            **first,
+            "_heysure_context_revision": "revision-2",
+            "messages": [
+                {"role": "system", "content": "历史摘要：记住代号青鸟"},
+                {"role": "user", "content": "代号是什么？"},
+            ],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
+            gateway.complete(first)
+            gateway.complete(compressed)
+        self.assertNotIn("resume", run.call_args_list[1].args[0])
+        self.assertIn("历史摘要：记住代号青鸟", run.call_args_list[1].kwargs["input"])
+        self.assertNotEqual(run.call_args_list[0].kwargs["cwd"], run.call_args_list[1].kwargs["cwd"])
+
     def test_tools_are_prompted_as_text_protocol(self):
         payload = {
             "user": "session-tools",
@@ -150,12 +173,19 @@ class CodexGatewayTests(unittest.TestCase):
                     "stream": True,
                     "messages": [{"role": "user", "content": "test"}],
                 }).encode("utf-8"),
-                headers={"Content-Type": "application/json", "X-HeySure-Session-ID": "http-session"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HeySure-Session-ID": "http-session",
+                    "X-HeySure-History-Mode": "full",
+                    "X-HeySure-Context-Revision": "revision-http",
+                },
             )
             with mock.patch.object(server.GATEWAY, "complete", return_value=completion) as complete:
                 with urllib.request.urlopen(request, timeout=5) as response:
                     body = response.read().decode("utf-8")
             self.assertEqual(complete.call_args.args[0]["_heysure_session_id"], "http-session")
+            self.assertEqual(complete.call_args.args[0]["_heysure_history_mode"], "full")
+            self.assertEqual(complete.call_args.args[0]["_heysure_context_revision"], "revision-http")
             self.assertIn("HTTP 成功", body)
             self.assertTrue(body.rstrip().endswith("data: [DONE]"))
         finally:

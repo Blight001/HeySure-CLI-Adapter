@@ -423,11 +423,19 @@ class UnifiedGatewayFleet:
                     if length <= 0 or length > 64 * 1024 * 1024:
                         raise ValueError("请求体为空或过大")
                     payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    forwarded_headers = {
+                        name: self.headers.get(name, "")
+                        for name in (
+                            "X-HeySure-Session-ID",
+                            "X-HeySure-History-Mode",
+                            "X-HeySure-Context-Revision",
+                            "X-HeySure-Request-ID",
+                        )
+                    }
                     if payload.get("stream"):
-                        fleet.stream(self, payload, headers={"X-HeySure-Session-ID": self.headers.get("X-HeySure-Session-ID", "")})
+                        fleet.stream(self, payload, headers=forwarded_headers)
                         return
-                    headers = {"X-HeySure-Session-ID": self.headers.get("X-HeySure-Session-ID", "")}
-                    self._send(200, fleet.complete(payload, headers=headers))
+                    self._send(200, fleet.complete(payload, headers=forwarded_headers))
                 except ValueError as exc:
                     self._send(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
                 except Exception as exc:
@@ -825,7 +833,11 @@ class CliAdapter:
         response = self.gateway.request(
             "/v1/chat/completions", payload,
             timeout=timeout,
-            headers={"X-HeySure-Session-ID": session_id},
+            headers={
+                "X-HeySure-Session-ID": session_id,
+                "X-HeySure-History-Mode": "incremental",
+                "X-HeySure-Request-ID": str(task.get("taskId") or ""),
+            },
         )
         choices = response.get("choices") or []
         message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
