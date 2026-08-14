@@ -891,7 +891,30 @@ def _stderr_thread(pipe, sink: List[bytes]) -> None:
         pass
 
 
-def run_cli_turn(model: str, messages: List[Dict]):
+def _reasoning_effort(value: Any) -> str:
+    effort = str(value or "").strip().lower()
+    return effort if effort in {"low", "medium", "high"} else ""
+
+
+def _headless_argv(cli_argv: List[str], prompt_path: str, model: str,
+                   reasoning_effort: str) -> List[str]:
+    full_argv = list(cli_argv) + [
+        "--prompt-file",
+        prompt_path,
+        "--system-prompt-override",
+        CLI_SYSTEM_WRAPPER,
+        "--cwd",
+        Config.cwd,
+    ] + CLI_FIXED_ARGS
+    effort = _reasoning_effort(reasoning_effort)
+    if effort:
+        full_argv += ["--reasoning-effort", effort]
+    if str(model or "").strip():
+        full_argv += ["-m", str(model).strip()]
+    return full_argv
+
+
+def run_cli_turn(model: str, messages: List[Dict], reasoning_effort: str = ""):
     """生成器：跑一轮 CLI 推理，产出 ("thought"|"text", str) 事件。
 
     CLI 缺失 / 启动失败 / 无输出异常退出时抛 RuntimeError（带用户可读信息）。
@@ -911,18 +934,9 @@ def run_cli_turn(model: str, messages: List[Dict]):
         prompt_file.close()
     temporary_paths.append(prompt_file.name)
 
-    full_argv = argv + [
-        "--prompt-file",
-        prompt_file.name,
-        "--system-prompt-override",
-        CLI_SYSTEM_WRAPPER,
-        "--cwd",
-        Config.cwd,
-        "--reasoning-effort",
-        "max",
-    ] + CLI_FIXED_ARGS
-    if str(model or "").strip():
-        full_argv += ["-m", str(model).strip()]
+    full_argv = _headless_argv(
+        argv, prompt_file.name, model, reasoning_effort
+    )
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
@@ -1111,6 +1125,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, "messages 不能为空")
             return
         model = str(payload.get("model") or "").strip()
+        reasoning_effort = _reasoning_effort(payload.get("reasoning_effort"))
         stream = bool(payload.get("stream"))
 
         tools = payload.get("tools")
@@ -1173,11 +1188,12 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("tool_choice"),
                     history_mode,
                     context_revision,
+                    reasoning_effort,
                 )
             elif stream:
-                self._handle_stream(model, messages, prompt_preview)
+                self._handle_stream(model, messages, prompt_preview, reasoning_effort)
             else:
-                self._handle_blocking(model, messages, prompt_preview)
+                self._handle_blocking(model, messages, prompt_preview, reasoning_effort)
         except (BrokenPipeError, ConnectionError):
             # 客户端断开：headless 路径由 run_cli_turn 的 finally 清理；
             # ACP 流式/阻塞路径会在写回失败时 cancel + drop。
@@ -1255,11 +1271,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- 推理 ---------------------------------------------------------------
 
-    def _handle_blocking(self, model: str, messages: List[Dict], prompt_preview: str) -> None:
+    def _handle_blocking(self, model: str, messages: List[Dict], prompt_preview: str,
+                         reasoning_effort: str = "") -> None:
         reasoning_parts: List[str] = []
         text_parts: List[str] = []
         try:
-            for kind, data in run_cli_turn(model, messages):
+            for kind, data in run_cli_turn(model, messages, reasoning_effort):
                 (reasoning_parts if kind == "thought" else text_parts).append(data)
         except RuntimeError as exc:
             self._error(500, str(exc), "server_error")
@@ -1285,7 +1302,8 @@ class Handler(BaseHTTPRequestHandler):
             "usage": _usage(prompt_preview, content + reasoning),
         })
 
-    def _handle_stream(self, model: str, messages: List[Dict], prompt_preview: str) -> None:
+    def _handle_stream(self, model: str, messages: List[Dict], prompt_preview: str,
+                       reasoning_effort: str = "") -> None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         model_name = model or (Config.models[0] if Config.models else "grok")
@@ -1336,7 +1354,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         try:
-            for kind, data in run_cli_turn(model, messages):
+            for kind, data in run_cli_turn(model, messages, reasoning_effort):
                 if kind == "thought":
                     # 思考流里落着的私有工具块会被抽出，改走 content（否则服务端
                     # 看不到工具调用，整轮被判为最终回答而中断）。
@@ -1374,6 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
         tool_choice: Any,
         history_mode: str = "",
         context_revision: str = "",
+        reasoning_effort: str = "",
     ) -> None:
         os.makedirs(RUNTIME_DIR, exist_ok=True)
         tools_registry = acp_bridge.tools_registry_from_payload(tools)
@@ -1386,6 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
             "messages": messages,
             "tools": tools,
             "tool_choice": tool_choice,
+            "reasoning_effort": reasoning_effort,
         })
 
         # Grok 1.0.0 的 ACP stdio 进程有两种行为：多数情况下会停在 MCP
@@ -1441,10 +1461,14 @@ class Handler(BaseHTTPRequestHandler):
                 and cand.conversation_identity == session_identity
             )
             model_matches = bool(cand is not None and (not model or cand.model == model))
+            effort_matches = bool(
+                cand is not None and cand.reasoning_effort == reasoning_effort
+            )
             acquired = bool(
                 process_alive
                 and identity_matches
                 and model_matches
+                and effort_matches
                 and cand.busy.acquire(timeout=1.0)
             )
             if acquired:
@@ -1502,6 +1526,7 @@ class Handler(BaseHTTPRequestHandler):
                     "process_exited" if not process_alive
                     else "identity_mismatch" if not identity_matches
                     else "model_mismatch" if not model_matches
+                    else "reasoning_effort_mismatch" if not effort_matches
                     else "busy_timeout"
                 )
                 _observe_acp(
@@ -1519,7 +1544,12 @@ class Handler(BaseHTTPRequestHandler):
         # 则复用同一个 ACP session/prompt，只投喂新增消息。
         if sess is None and session_identity:
             cand = ACP_REGISTRY.get_by_identity(session_identity)
-            if cand is not None and not cand.closed and (not model or cand.model == model):
+            if (
+                cand is not None
+                and not cand.closed
+                and (not model or cand.model == model)
+                and cand.reasoning_effort == reasoning_effort
+            ):
                 acquired = cand.busy.acquire(timeout=float(Config.timeout))
                 if acquired and not cand.closed:
                     if (
@@ -1579,6 +1609,7 @@ class Handler(BaseHTTPRequestHandler):
                     raw_results=raw_results,
                     tail_msgs=tail_msgs,
                     context_revision=context_revision,
+                    reasoning_effort=reasoning_effort,
                 )
             except (RuntimeError, acp_bridge.AcpError) as exc:
                 _observe_acp(
@@ -1601,6 +1632,7 @@ class Handler(BaseHTTPRequestHandler):
                     raw_results=raw_results,
                     tail_msgs=tail_msgs,
                     context_revision=context_revision,
+                    reasoning_effort=reasoning_effort,
                 )
 
         request_state = {
@@ -1633,6 +1665,7 @@ class Handler(BaseHTTPRequestHandler):
         raw_results: Dict[str, Any],
         tail_msgs: List[Dict],
         context_revision: str,
+        reasoning_effort: str,
     ):
         """Create/load one ACP process and start the requested turn."""
         temp_paths: List[str] = []
@@ -1658,6 +1691,7 @@ class Handler(BaseHTTPRequestHandler):
                     mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
                     cwd=Config.cwd, registry=ACP_REGISTRY,
                     resume_session_id=resume_id,
+                    reasoning_effort=reasoning_effort,
                 )
             except acp_bridge.AcpError:
                 if not resume_id:
@@ -1679,6 +1713,7 @@ class Handler(BaseHTTPRequestHandler):
                     exe=argv[0], model=model, tools=tools_registry,
                     mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
                     cwd=Config.cwd, registry=ACP_REGISTRY,
+                    reasoning_effort=reasoning_effort,
                 )
             _observe_acp(
                 "native_session_ready",

@@ -46,6 +46,7 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
         server.Config.session_ttl = 10
         server.Config.api_key = ""
         server.Config.acp_enabled = True
+        self.reasoning_effort = ""
         self.previous_persisted = dict(server._ACP_PERSISTED)
         server._ACP_PERSISTED.clear()
 
@@ -64,12 +65,15 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def chat_request(self, messages, tools, stream=False):
-        body = json.dumps({
+        payload = {
             "model": "grok-4.5",
             "messages": messages,
             "tools": tools,
             "stream": stream,
-        }).encode("utf-8")
+        }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        body = json.dumps(payload).encode("utf-8")
         return urllib.request.Request(
             f"http://127.0.0.1:{server.Config.port}/v1/chat/completions",
             data=body,
@@ -100,8 +104,11 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
     def test_tool_result_loads_native_session_and_continues_in_new_process(self):
         real_popen = subprocess.Popen
         launched = []
+        launched_argv = []
+        self.reasoning_effort = "high"
 
         def launch_fake(_argv, **kwargs):
+            launched_argv.append(list(_argv))
             process = real_popen([sys.executable, str(FAKE_AGENT)], **kwargs)
             launched.append(process)
             return process
@@ -141,6 +148,11 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
                     "content": "Seoul is healthy",
                 }]
                 second = self.post_chat(continued_messages, tools)
+                self.assertTrue(launched_argv)
+                self.assertTrue(all(
+                    argv[argv.index("--reasoning-effort") + 1] == "high"
+                    for argv in launched_argv
+                ))
         finally:
             for process in launched:
                 try:

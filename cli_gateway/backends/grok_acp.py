@@ -103,9 +103,10 @@ class AcpSession:
       ("error", str)         会话级错误（进程死亡 / prompt 被拒 …）
     """
 
-    def __init__(self, token: str, model: str):
+    def __init__(self, token: str, model: str, reasoning_effort: str = ""):
         self.token = token
         self.model = model
+        self.reasoning_effort = reasoning_effort
         # Optional stable identity supplied by the OpenAI client (HeySure sends
         # X-HeySure-Session-ID).  A session with an identity may survive the end
         # of one user turn and accept another session/prompt later.
@@ -153,6 +154,7 @@ class AcpSession:
         registry: "SessionRegistry",
         init_timeout: float = 60.0,
         resume_session_id: str = "",
+        reasoning_effort: str = "",
     ) -> "AcpSession":
         """spawn + initialize + session/new。失败抛 AcpError（进程已清理）。
 
@@ -160,7 +162,9 @@ class AcpSession:
         再做 session/new——grok 建会话时就会连过来 initialize/tools/list。
         """
         token = uuid.uuid4().hex[:8]
-        sess = cls(token, model)
+        effort = str(reasoning_effort or "").strip().lower()
+        effort = effort if effort in {"low", "medium", "high"} else ""
+        sess = cls(token, model, effort)
         sess.busy.acquire()  # 创建者持有 busy，请求结束时 release/close
         sess.update_tools(tools)
         mcp_url = f"{mcp_url_base.rstrip('/')}/{token}"
@@ -169,8 +173,8 @@ class AcpSession:
         argv = [exe, "agent"]
         if str(model or "").strip():
             argv += ["-m", str(model).strip()]
-        # 服务端固定使用 Grok CLI 支持的最高推理档位，不接受 API 覆盖。
-        argv += ["--reasoning-effort", "max"]
+        if effort:
+            argv += ["--reasoning-effort", effort]
         # 7×24 全自动项目：不要任何工具确认环节，全部自动放行。
         argv += ["--always-approve", "--no-leader", "stdio"]
 

@@ -210,12 +210,26 @@ def _parse_codex_jsonl(stdout: str) -> Tuple[str, str, Dict[str, int]]:
     return thread_id, "\n".join(messages).strip(), usage
 
 
-def _run_codex(prompt: str, model: str, cwd: str, thread_id: str = "") -> Tuple[str, str, Dict[str, int]]:
+def _reasoning_effort(value: Any) -> str:
+    effort = str(value or "").strip().lower()
+    return effort if effort in {"low", "medium", "high"} else ""
+
+
+def _run_codex(
+    prompt: str,
+    model: str,
+    cwd: str,
+    thread_id: str = "",
+    reasoning_effort: str = "",
+) -> Tuple[str, str, Dict[str, int]]:
     # Parent ``exec`` options must precede the ``resume`` subcommand.  In
     # particular, ``codex exec resume --help`` does not expose --sandbox.
     argv = _command_prefix() + ["exec", "--json", "--skip-git-repo-check", "--sandbox", Config.sandbox]
     if model:
         argv += ["--model", model]
+    effort = _reasoning_effort(reasoning_effort)
+    if effort:
+        argv += ["-c", f'model_reasoning_effort="{effort}"']
     if thread_id:
         argv += ["resume", thread_id, "-"]
     else:
@@ -271,12 +285,15 @@ class CodexGateway:
             cli_model = requested_model
             response_model = requested_model
         identity = _session_identity(payload)
+        reasoning_effort = _reasoning_effort(payload.get("reasoning_effort"))
         session_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         with _session_lock(session_key):
             root = os.path.join(Config.sessions_dir, session_key)
             state_path = os.path.join(root, "state.json")
             state = _load_json(state_path)
-            current_hash = _history_hash(messages)
+            current_hash = hashlib.sha256(
+                f"{_history_hash(messages)}\0{reasoning_effort}".encode("utf-8")
+            ).hexdigest()
             history_mode = str(payload.get("_heysure_history_mode") or "").strip().lower()
             context_revision = str(payload.get("_heysure_context_revision") or "").strip()
             previous_revision = str(state.get("context_revision") or "").strip()
@@ -313,6 +330,7 @@ class CodexGateway:
                 cli_model,
                 workspace,
                 str(state.get("thread_id") or "") if can_resume else "",
+                reasoning_effort,
             )
             response = _completion(response_model, answer, usage)
             _save_json(state_path, {

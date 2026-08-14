@@ -17,6 +17,15 @@ class StatefulAcpHelpersTest(unittest.TestCase):
     def make_session(self):
         return acp_bridge.AcpSession("1234abcd", "grok-4.5")
 
+    def test_headless_reasoning_effort_defaults_to_cli_and_allows_override(self):
+        default_argv = server._headless_argv(["grok"], "prompt.txt", "grok-4.5", "")
+        self.assertNotIn("--reasoning-effort", default_argv)
+        high_argv = server._headless_argv(["grok"], "prompt.txt", "grok-4.5", "high")
+        self.assertEqual(
+            high_argv[high_argv.index("--reasoning-effort") + 1],
+            "high",
+        )
+
     def remember(self, sess, request_messages, response_text="first answer"):
         server.Handler._remember_acp_response(
             sess,

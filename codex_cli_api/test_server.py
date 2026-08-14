@@ -68,7 +68,31 @@ class CodexGatewayTests(unittest.TestCase):
         with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
             result = server.CodexGateway().complete(payload)
         self.assertNotIn("--model", run.call_args.args[0])
+        self.assertNotIn("model_reasoning_effort", " ".join(run.call_args.args[0]))
         self.assertEqual(result["model"], "codex-default")
+
+    def test_explicit_reasoning_effort_is_forwarded_to_codex_cli(self):
+        payload = {
+            "user": "session-effort",
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
+            server.CodexGateway().complete(payload)
+        argv = run.call_args.args[0]
+        self.assertIn("-c", argv)
+        self.assertIn('model_reasoning_effort="high"', argv)
+
+    def test_reasoning_effort_change_does_not_reuse_cached_response(self):
+        gateway = server.CodexGateway()
+        payload = {
+            "user": "session-effort-cache",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
+            gateway.complete(payload)
+            gateway.complete({**payload, "reasoning_effort": "low"})
+        self.assertEqual(run.call_count, 2)
 
     def test_new_session_then_resume_with_incremental_history(self):
         gateway = server.CodexGateway()
