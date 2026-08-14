@@ -136,36 +136,16 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         self.assertIs(registry.get_by_identity("same-chat"), new)
         registry.drop(new)
 
-    def test_uploaded_history_recovers_identity_without_header(self):
-        initial = [
+    def test_missing_header_never_guesses_identity_from_history(self):
+        messages = [
             {"role": "system", "content": "stable system"},
             {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first answer"},
         ]
-        response = {"role": "assistant", "content": "first answer"}
-        follow_up = initial + [response, {"role": "user", "content": "second"}]
-        with server._ACP_PERSISTED_LOCK:
-            previous = dict(server._ACP_PERSISTED)
-            server._ACP_PERSISTED.clear()
-        try:
-            with mock.patch.object(server, "_save_persisted_sessions_locked"):
-                identity = server._resolve_session_identity("", initial, "grok-4.5")
-                synced = server._message_hashes(initial) + [server._fingerprint(response)]
-                server._remember_persisted_session(
-                    identity, "grok-session", model="grok-4.5",
-                    message_hashes=synced,
-                )
-                self.assertEqual(
-                    server._resolve_session_identity("", follow_up, "grok-4.5"),
-                    identity,
-                )
-                self.assertNotEqual(
-                    server._resolve_session_identity("", initial, "grok-4.5"),
-                    identity,
-                )
-        finally:
-            with server._ACP_PERSISTED_LOCK:
-                server._ACP_PERSISTED.clear()
-                server._ACP_PERSISTED.update(previous)
+        self.assertEqual(
+            server._resolve_session_identity("", messages, "grok-4.5"),
+            "",
+        )
 
     def test_explicit_identity_has_priority_over_uploaded_history(self):
         self.assertEqual(
@@ -298,6 +278,7 @@ class AlwaysAcpRoutingTest(unittest.TestCase):
             "model": "grok-4.5",
             "messages": [{"role": "user", "content": "hello"}],
             "stream": False,
+            "user": "legacy-unstable-user-field",
         }
         body = json.dumps(payload).encode("utf-8")
         handler = object.__new__(server.Handler)
@@ -314,7 +295,41 @@ class AlwaysAcpRoutingTest(unittest.TestCase):
         handler._handle_acp_chat.assert_called_once()
         args = handler._handle_acp_chat.call_args.args
         self.assertEqual(args[2], [])
-        self.assertTrue(args[5].startswith("history-"))
+        self.assertEqual(args[5], "")
+
+    def test_mcp_access_log_redacts_process_token(self):
+        handler = object.__new__(server.Handler)
+        handler.address_string = lambda: "127.0.0.1"
+        with mock.patch("builtins.print") as output:
+            handler.log_message('%s', 'POST /mcp/deadbeef HTTP/1.1')
+        rendered = output.call_args.args[0]
+        self.assertIn("/mcp/<redacted>", rendered)
+        self.assertNotIn("deadbeef", rendered)
+
+    def test_incremental_request_requires_stable_session_header(self):
+        payload = {
+            "model": "grok-4.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        handler = object.__new__(server.Handler)
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "X-HeySure-History-Mode": "incremental",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler._path = lambda: "/v1/chat/completions"
+        handler._check_auth = lambda: True
+        handler._handle_acp_chat = mock.Mock()
+        handler._error = mock.Mock()
+
+        handler.do_POST()
+
+        handler._handle_acp_chat.assert_not_called()
+        handler._error.assert_called_once()
+        self.assertEqual(handler._error.call_args.args[0], 400)
+        self.assertEqual(handler._error.call_args.args[2], "missing_session_id")
 
 
 class HandlerDisconnectTest(unittest.TestCase):

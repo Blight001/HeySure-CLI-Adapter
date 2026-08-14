@@ -22,6 +22,7 @@ OpenAI ``tools[]`` 作为一个 HTTP MCP server 注册给 grok（``session/new``
 纯 Python 标准库。
 """
 
+import hashlib
 import json
 import os
 import re
@@ -44,9 +45,33 @@ CALL_ID_RE = re.compile(r"^call_([0-9a-f]{8})-(\d+)$")
 _ALLOW_KIND_PREFIX = "allow"
 
 
-def _dbg(msg: str) -> None:
-    if ACP_DEBUG:
-        print(f"[acp] {msg}")
+def _safe_ref(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(("heysure-grok-acp:" + normalized).encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_code(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_./:-]{1,64}", normalized):
+        return normalized
+    return "other"
+
+
+def _dbg(event: str, **fields: Any) -> None:
+    """Content-free debug logging; never emit raw ACP payloads or identifiers."""
+    if not ACP_DEBUG:
+        return
+    payload: Dict[str, Any] = {"component": "grok_acp", "event": _safe_code(event)}
+    for key, value in fields.items():
+        if key.endswith("_ref"):
+            payload[key] = _safe_ref(value)
+        elif isinstance(value, (bool, int, float)) or value is None:
+            payload[key] = value
+        elif key in {"method", "outcome"}:
+            payload[key] = _safe_code(value)
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 class AcpError(RuntimeError):
@@ -193,7 +218,11 @@ class AcpSession:
                 )
                 # ACP session/load 通常返回空对象；沿用请求中的持久化 ID。
                 sess.session_id = str(result.get("sessionId") or resume_session_id)
-                _dbg(f"session {token} loaded persisted sid={sess.session_id}")
+                _dbg(
+                    "session_loaded",
+                    process_ref=token,
+                    native_session_ref=sess.session_id,
+                )
             else:
                 result = sess._rpc_request(
                     "session/new", session_params, timeout=init_timeout
@@ -207,7 +236,11 @@ class AcpSession:
         except Exception as exc:
             registry.drop(sess)
             raise AcpError(f"ACP 会话初始化失败：{exc}") from exc
-        _dbg(f"session {token} ready (acp sid={sess.session_id})")
+        _dbg(
+            "session_ready",
+            process_ref=token,
+            native_session_ref=sess.session_id,
+        )
         return sess
 
     def close(self) -> None:
@@ -246,7 +279,7 @@ class AcpSession:
             except OSError:
                 pass
         self.temp_paths.clear()
-        _dbg(f"session {self.token} closed")
+        _dbg("session_closed", process_ref=self.token)
 
     def cancel_turn(self) -> None:
         """尽力通知 grok 取消当前 turn（客户端断开时用），随后仍应 close()。"""
@@ -337,7 +370,7 @@ class AcpSession:
             pc = PendingToolCall(f"call_{self.token}-{self._call_seq}", name, arguments)
             self.pending[pc.call_id] = pc
         self.queue.put(("mcp_call", pc))
-        _dbg(f"session {self.token} tools/call {name} → {pc.call_id}")
+        _dbg("tool_call", process_ref=self.token)
 
         deadline = time.time() + timeout
         while not pc.event.wait(timeout=5.0):
@@ -387,7 +420,7 @@ class AcpSession:
 
     def _write(self, obj: Dict[str, Any]) -> None:
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-        _dbg(f">> {data[:400]!r}")
+        _dbg("rpc_send", method=obj.get("method") or "response")
         try:
             self.proc.stdin.write(data)
             self.proc.stdin.flush()
@@ -404,13 +437,13 @@ class AcpSession:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
-                _dbg(f"<< {line[:400]}")
                 try:
                     msg = json.loads(line)
                 except Exception:
                     continue
                 if not isinstance(msg, dict):
                     continue
+                _dbg("rpc_receive", method=msg.get("method") or "response")
                 if "method" in msg and "id" in msg:
                     threading.Thread(
                         target=self._handle_agent_request, args=(msg,), daemon=True

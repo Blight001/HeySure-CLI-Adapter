@@ -126,6 +126,52 @@ _ACP_PERSISTED_LOCK = threading.Lock()
 _ACP_PERSISTED_PATH = os.path.join(RUNTIME_DIR, "acp_sessions.json")
 _ACP_PERSISTED: Dict[str, Dict[str, Any]] = {}
 _ACP_PERSISTED_MAX = 1000
+_ACP_OBSERVABILITY_LOCK = threading.Lock()
+_ACP_EVENT_COUNTS: Dict[str, int] = {}
+
+
+def _short_hash(value: Any) -> str:
+    """Return a non-reversible correlation key suitable for logs."""
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(("heysure-grok-acp:" + normalized).encode("utf-8")).hexdigest()[:12]
+
+
+def _observe_acp(
+    event: str,
+    *,
+    identity: str = "",
+    native_session_id: str = "",
+    reason: str = "",
+    **fields: Any,
+) -> None:
+    """Emit one content-free ACP continuity event.
+
+    Conversation text, credentials, tool arguments/results, process tokens and
+    complete session identifiers must never be passed to this function.
+    """
+    event = str(event or "unknown")
+    with _ACP_OBSERVABILITY_LOCK:
+        count = _ACP_EVENT_COUNTS.get(event, 0) + 1
+        _ACP_EVENT_COUNTS[event] = count
+    payload: Dict[str, Any] = {
+        "component": "grok_acp_continuity",
+        "event": event,
+        "event_count": count,
+    }
+    if identity:
+        payload["conversation_ref"] = _short_hash(identity)
+    if native_session_id:
+        payload["native_session_ref"] = _short_hash(native_session_id)
+    if reason:
+        payload["reason"] = str(reason)
+    for key, value in fields.items():
+        if isinstance(value, (bool, int, float)) or value is None:
+            payload[str(key)] = value
+        elif key in {"mode", "source", "outcome"}:
+            payload[str(key)] = str(value)
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _load_persisted_sessions() -> None:
@@ -196,6 +242,12 @@ def _remember_persisted_session(
             for key in oldest:
                 _ACP_PERSISTED.pop(key, None)
         _save_persisted_sessions_locked()
+    _observe_acp(
+        "session_checkpoint_saved",
+        identity=identity,
+        native_session_id=session_id,
+        reason="append_only_checkpoint",
+    )
 
 
 def _persisted_session(identity: str) -> str:
@@ -235,39 +287,17 @@ def _forget_persisted_session(identity: str) -> None:
             _save_persisted_sessions_locked()
 
 
-def _match_persisted_identity(messages: List[Dict], model: str) -> str:
-    current = _message_hashes(messages)
-    best_identity = ""
-    best_length = -1
-    best_updated = -1.0
-    with _ACP_PERSISTED_LOCK:
-        entries = list(_ACP_PERSISTED.items())
-    for identity, entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        stored_model = str(entry.get("model") or "").strip()
-        if stored_model and model and stored_model != model:
-            continue
-        stored = [str(item) for item in (entry.get("message_hashes") or []) if item]
-        if not stored or len(current) < len(stored) or current[: len(stored)] != stored:
-            continue
-        updated = float(entry.get("updated_at") or 0)
-        if len(stored) > best_length or (len(stored) == best_length and updated > best_updated):
-            best_identity = identity
-            best_length = len(stored)
-            best_updated = updated
-    return best_identity
-
-
 def _resolve_session_identity(explicit: str, messages: List[Dict], model: str) -> str:
+    """Resolve only a caller-supplied stable identity.
+
+    History fingerprint matching used to guess an identity when the header was
+    absent. Similar append-only histories can be ambiguous, so anonymous ACP
+    requests now run as controlled stateless turns instead.
+    """
     explicit = str(explicit or "").strip()
     if explicit:
         return explicit
-    matched = _match_persisted_identity(messages, model)
-    if matched:
-        return matched
-    anchor = _fingerprint({"model": model, "messages": _message_hashes(messages)})[:16]
-    return f"history-{anchor}-{uuid.uuid4().hex[:16]}"
+    return ""
 
 
 _load_persisted_sessions()
@@ -962,7 +992,13 @@ class Handler(BaseHTTPRequestHandler):
     # -- 基础 ---------------------------------------------------------------
 
     def log_message(self, fmt, *args):
-        print(f"[{time.strftime('%H:%M:%S')}] {self.address_string()} {fmt % args}")
+        rendered = fmt % args
+        rendered = re.sub(
+            r"/mcp/[0-9a-fA-F]{8}(?=[?\s])",
+            "/mcp/<redacted>",
+            rendered,
+        )
+        print(f"[{time.strftime('%H:%M:%S')}] {self.address_string()} {rendered}")
 
     def _json_response(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1061,14 +1097,47 @@ class Handler(BaseHTTPRequestHandler):
             tools = []
         use_acp = bool(Config.acp_enabled)
         explicit_identity = str(
-            self.headers.get("X-HeySure-Session-ID", "") or payload.get("user") or ""
+            self.headers.get("X-HeySure-Session-ID", "") or ""
         ).strip()
         history_mode = self.headers.get("X-HeySure-History-Mode", "").strip().lower()
         context_revision = self.headers.get("X-HeySure-Context-Revision", "").strip()
+        if len(explicit_identity) > 256 or any(ord(ch) < 32 for ch in explicit_identity):
+            _observe_acp("request_rejected", reason="invalid_session_id")
+            self._error(
+                400,
+                "X-HeySure-Session-ID 必须是 1–256 字符且不能包含控制字符",
+                "invalid_session_id",
+            )
+            return
+        stateful_requested = history_mode != "stateless" and (
+            history_mode in {"incremental", "replace"} or bool(context_revision)
+        )
+        if use_acp and stateful_requested and not explicit_identity:
+            _observe_acp("request_rejected", reason="missing_stable_session_id")
+            self._error(
+                400,
+                "请求增量/替换会话时必须提供稳定的 X-HeySure-Session-ID；"
+                "无会话 ID 的普通请求仅支持 stateless 模式",
+                "missing_session_id",
+            )
+            return
         session_identity = (
             "" if history_mode == "stateless"
             else _resolve_session_identity(explicit_identity, messages, model)
         )
+        if use_acp:
+            mode = "stateful" if session_identity else "stateless"
+            reason = (
+                "explicit_stateless"
+                if history_mode == "stateless"
+                else "stable_header" if session_identity else "missing_header"
+            )
+            _observe_acp(
+                "request_mode",
+                identity=session_identity,
+                reason=reason,
+                mode=mode,
+            )
 
         prompt_preview = json.dumps(messages, ensure_ascii=False)
         try:
@@ -1314,12 +1383,29 @@ class Handler(BaseHTTPRequestHandler):
                 and _persisted_history_rewritten(session_identity, current_hashes, bool(token))
             )
             if history_mode == "replace" or revision_changed or history_rewritten:
+                reset_reason = (
+                    "explicit_replace"
+                    if history_mode == "replace"
+                    else "context_revision_changed" if revision_changed else "history_rewritten"
+                )
+                _observe_acp(
+                    "session_reset",
+                    identity=session_identity,
+                    native_session_id=persisted_id,
+                    reason=reset_reason,
+                )
                 current = ACP_REGISTRY.get_by_identity(session_identity)
                 if current is not None:
                     ACP_REGISTRY.drop(current)
                 _forget_persisted_session(session_identity)
         if token:
             cand = ACP_REGISTRY.get(token)
+            _observe_acp(
+                "tool_resume_received",
+                identity=session_identity,
+                native_session_id=cand.session_id if cand is not None else "",
+                reason="live_process_found" if cand is not None else "live_process_missing",
+            )
             if cand is not None:
                 ACP_REGISTRY.drop(cand)
 
@@ -1336,6 +1422,12 @@ class Handler(BaseHTTPRequestHandler):
                         and cand.last_finish_reason
                     ):
                         try:
+                            _observe_acp(
+                                "live_session_reused",
+                                identity=session_identity,
+                                native_session_id=cand.session_id,
+                                reason="cached_response",
+                            )
                             self._send_cached_acp(
                                 cand, model, stream, prompt_preview
                             )
@@ -1351,8 +1443,20 @@ class Handler(BaseHTTPRequestHandler):
                         cand.adopt_temp_paths(temp_paths)
                         cand.start_turn(incremental)
                         sess = cand
+                        _observe_acp(
+                            "live_session_reused",
+                            identity=session_identity,
+                            native_session_id=cand.session_id,
+                            reason="append_only_increment",
+                        )
                     else:
                         cand.busy.release()
+                        _observe_acp(
+                            "live_session_dropped",
+                            identity=session_identity,
+                            native_session_id=cand.session_id,
+                            reason="history_not_append_only",
+                        )
                         ACP_REGISTRY.drop(cand)
                 elif acquired:
                     cand.busy.release()
@@ -1361,6 +1465,7 @@ class Handler(BaseHTTPRequestHandler):
         if sess is None:
             temp_paths = []
             resume_id = _persisted_session(session_identity) if session_identity else ""
+            loaded_native = bool(resume_id)
             try:
                 argv = _resolve_cli_argv()
                 if resume_id and token:
@@ -1370,6 +1475,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
                 try:
+                    _observe_acp(
+                        "native_session_open",
+                        identity=session_identity,
+                        native_session_id=resume_id,
+                        reason="load" if resume_id else "new",
+                    )
                     sess = acp_bridge.AcpSession.create(
                         exe=argv[0], model=model, tools=tools_registry,
                         mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
@@ -1379,7 +1490,14 @@ class Handler(BaseHTTPRequestHandler):
                 except acp_bridge.AcpError:
                     if not resume_id:
                         raise
+                    _observe_acp(
+                        "native_session_load_failed",
+                        identity=session_identity,
+                        native_session_id=resume_id,
+                        reason="acp_load_error_fallback_new",
+                    )
                     _forget_persisted_session(session_identity)
+                    loaded_native = False
                     _unlink_quietly(temp_paths)
                     temp_paths = []
                     prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
@@ -1390,9 +1508,20 @@ class Handler(BaseHTTPRequestHandler):
                     )
             except (RuntimeError, acp_bridge.AcpError) as exc:
                 _unlink_quietly(temp_paths)
-                print(f"[acp] 会话创建失败：{exc}")
+                _observe_acp(
+                    "native_session_open_failed",
+                    identity=session_identity,
+                    reason="acp_create_error",
+                )
                 self._error(502, f"Grok ACP 会话创建失败：{exc}")
                 return
+            _observe_acp(
+                "native_session_ready",
+                identity=session_identity,
+                native_session_id=sess.session_id,
+                reason="loaded" if loaded_native else "created",
+                mode="stateful" if session_identity else "stateless",
+            )
             if session_identity:
                 ACP_REGISTRY.bind_identity(sess, session_identity)
             sess.context_revision = context_revision
