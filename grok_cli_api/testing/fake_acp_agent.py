@@ -35,7 +35,31 @@ def mcp_call(url):
         url, data=payload, headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        response.read()
+        return json.loads(response.read().decode("utf-8"))
+
+
+def finish_prompt(rpc_id):
+    emit({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Using the existing plan."},
+        }},
+    })
+    emit({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Continued after the tool result."},
+        }},
+    })
+    emit({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": {"stopReason": "end_turn"},
+    })
 
 
 def main():
@@ -73,28 +97,9 @@ def main():
             )
             if "[工具执行结果]" not in prompt:
                 mcp_call(mcp_url)
+                finish_prompt(rpc_id)
                 continue
-            emit({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {"update": {
-                    "sessionUpdate": "agent_thought_chunk",
-                    "content": {"type": "text", "text": "Using the existing plan."},
-                }},
-            })
-            emit({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {"update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": "Continued after the tool result."},
-                }},
-            })
-            emit({
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "result": {"stopReason": "end_turn"},
-            })
+            finish_prompt(rpc_id)
 
 
 if __name__ == "__main__":

@@ -1366,9 +1366,9 @@ class Handler(BaseHTTPRequestHandler):
             "tool_choice": tool_choice,
         })
 
-        # Grok 1.0.0 的 ACP stdio 进程在一次工具调用上报后可能直接退出。
-        # 命中 tool_call token 时回收失效进程，但保留持久化 sessionId；随后
-        # session/load 同一个 Grok 原生会话，并把工具结果作为新增一轮继续输入。
+        # Grok 1.0.0 的 ACP stdio 进程有两种行为：多数情况下会停在 MCP
+        # tools/call 等待回执，少数情况下会直接退出。优先回答仍然存活的调用，
+        # 这样同一个 session/prompt 能原地继续；只有活进程不可用时才 session/load。
         sess = None
         if session_identity:
             persisted_id = _persisted_session(session_identity)
@@ -1400,13 +1400,93 @@ class Handler(BaseHTTPRequestHandler):
                 _forget_persisted_session(session_identity)
         if token:
             cand = ACP_REGISTRY.get(token)
+            process_alive = bool(
+                cand is not None
+                and not cand.closed
+                and cand.proc is not None
+                and cand.proc.poll() is None
+            )
             _observe_acp(
                 "tool_resume_received",
                 identity=session_identity,
                 native_session_id=cand.session_id if cand is not None else "",
-                reason="live_process_found" if cand is not None else "live_process_missing",
+                reason="live_process_found" if process_alive else "live_process_missing",
+                process_alive=process_alive,
             )
-            if cand is not None:
+            identity_matches = bool(
+                cand is not None
+                and cand.conversation_identity == session_identity
+            )
+            model_matches = bool(cand is not None and (not model or cand.model == model))
+            acquired = bool(
+                process_alive
+                and identity_matches
+                and model_matches
+                and cand.busy.acquire(timeout=1.0)
+            )
+            if acquired:
+                try:
+                    process_alive = bool(
+                        not cand.closed
+                        and cand.proc is not None
+                        and cand.proc.poll() is None
+                    )
+                    results = {
+                        call_id: _content_to_text(content, temp_paths)
+                        for call_id, content in raw_results.items()
+                    }
+                    if process_alive and cand.matches_results(results):
+                        cand.update_tools(tools_registry)
+                        cand.adopt_temp_paths(temp_paths)
+                        temp_paths = []
+                        cand.answer_calls(
+                            results, _serialize_tail(tail_msgs, cand.temp_paths)
+                        )
+                        sess = cand
+                        _observe_acp(
+                            "live_tool_resume",
+                            identity=session_identity,
+                            native_session_id=cand.session_id,
+                            reason="pending_calls_answered",
+                            answered_count=len(results),
+                        )
+                    else:
+                        reason = "process_exited" if not process_alive else "pending_mismatch"
+                        _observe_acp(
+                            "live_tool_resume_fallback",
+                            identity=session_identity,
+                            native_session_id=cand.session_id,
+                            reason=reason,
+                        )
+                except Exception:
+                    _observe_acp(
+                        "live_tool_resume_fallback",
+                        identity=session_identity,
+                        native_session_id=cand.session_id,
+                        reason="answer_failed",
+                    )
+                finally:
+                    if sess is None:
+                        try:
+                            cand.busy.release()
+                        except RuntimeError:
+                            pass
+            elif cand is not None:
+                reason = (
+                    "process_exited" if not process_alive
+                    else "identity_mismatch" if not identity_matches
+                    else "model_mismatch" if not model_matches
+                    else "busy_timeout"
+                )
+                _observe_acp(
+                    "live_tool_resume_fallback",
+                    identity=session_identity,
+                    native_session_id=cand.session_id,
+                    reason=reason,
+                )
+            if cand is not None and sess is None:
+                _unlink_quietly(temp_paths)
+                temp_paths = []
                 ACP_REGISTRY.drop(cand)
 
         # 跨用户轮次续接：HeySure 的稳定会话 ID 命中且历史是追加式，
