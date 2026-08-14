@@ -290,6 +290,59 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
         self.assertEqual(len([item for item in trace if item["method"] == "session/load"]), 0)
         self.assertEqual(len([item for item in trace if item["method"] == "session/prompt"]), 1)
 
+    def test_live_process_exit_after_answer_falls_back_to_native_load(self):
+        real_popen = subprocess.Popen
+        launched = []
+
+        def launch_fake(_argv, **kwargs):
+            process = real_popen([sys.executable, str(FAKE_AGENT)], **kwargs)
+            launched.append(process)
+            return process
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "lookup_status",
+                "description": "Look up a server status",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        initial_messages = [{"role": "user", "content": "Check Seoul, then report."}]
+
+        try:
+            with mock.patch.object(server, "ACP_REGISTRY", self.registry), mock.patch.object(
+                server, "_save_persisted_sessions_locked"
+            ), mock.patch.dict(os.environ, {
+                "GROK_FAKE_ACP_TRACE": str(self.trace_path),
+                "GROK_FAKE_ACP_EXIT_AFTER_RESULT": "1",
+            }), mock.patch.object(grok_acp.subprocess, "Popen", side_effect=launch_fake):
+                first = self.post_chat(initial_messages, tools)
+                first_message = first["choices"][0]["message"]
+                call = first_message["tool_calls"][0]
+                second = self.post_chat(initial_messages + [first_message, {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": "Seoul is healthy",
+                }], tools)
+        finally:
+            for process in launched:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    if pipe is not None:
+                        pipe.close()
+
+        choice = second["choices"][0]
+        self.assertEqual(choice["finish_reason"], "stop")
+        self.assertEqual(choice["message"]["content"], "Continued after the tool result.")
+        trace = self.read_trace()
+        self.assertEqual(len(launched), 2)
+        self.assertEqual(len([item for item in trace if item["method"] == "session/new"]), 1)
+        self.assertEqual(len([item for item in trace if item["method"] == "session/load"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

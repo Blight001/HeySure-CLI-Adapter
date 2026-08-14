@@ -97,6 +97,8 @@ def main():
             )
             if "[工具执行结果]" not in prompt:
                 mcp_call(mcp_url)
+                if os.environ.get("GROK_FAKE_ACP_EXIT_AFTER_RESULT") == "1":
+                    return
                 finish_prompt(rpc_id)
                 continue
             finish_prompt(rpc_id)

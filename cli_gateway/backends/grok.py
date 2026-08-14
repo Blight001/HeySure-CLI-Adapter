@@ -1357,6 +1357,7 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(RUNTIME_DIR, exist_ok=True)
         tools_registry = acp_bridge.tools_registry_from_payload(tools)
         temp_paths: List[str] = []
+        sess = None
         token, raw_results, tail_msgs = acp_bridge.extract_resume_info(messages)
         current_hashes = _message_hashes(messages)
         request_digest = _fingerprint({
@@ -1370,6 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
         # tools/call 等待回执，少数情况下会直接退出。优先回答仍然存活的调用，
         # 这样同一个 session/prompt 能原地继续；只有活进程不可用时才 session/load。
         sess = None
+        live_tool_resumed = False
         if session_identity:
             persisted_id = _persisted_session(session_identity)
             previous_revision = _persisted_context_revision(session_identity)
@@ -1443,6 +1445,7 @@ class Handler(BaseHTTPRequestHandler):
                             results, _serialize_tail(tail_msgs, cand.temp_paths)
                         )
                         sess = cand
+                        live_tool_resumed = True
                         _observe_acp(
                             "live_tool_resume",
                             identity=session_identity,
@@ -1543,51 +1546,18 @@ class Handler(BaseHTTPRequestHandler):
 
         # stdio 进程每轮退出，但始终优先用持久化 sessionId 恢复真实会话。
         if sess is None:
-            temp_paths = []
-            resume_id = _persisted_session(session_identity) if session_identity else ""
-            loaded_native = bool(resume_id)
             try:
-                argv = _resolve_cli_argv()
-                if resume_id and token:
-                    prompt_text = _serialize_tool_resume(raw_results, tail_msgs, temp_paths)
-                elif resume_id:
-                    prompt_text = _latest_user_turn(messages, temp_paths)
-                else:
-                    prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
-                try:
-                    _observe_acp(
-                        "native_session_open",
-                        identity=session_identity,
-                        native_session_id=resume_id,
-                        reason="load" if resume_id else "new",
-                    )
-                    sess = acp_bridge.AcpSession.create(
-                        exe=argv[0], model=model, tools=tools_registry,
-                        mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
-                        cwd=Config.cwd, registry=ACP_REGISTRY,
-                        resume_session_id=resume_id,
-                    )
-                except acp_bridge.AcpError:
-                    if not resume_id:
-                        raise
-                    _observe_acp(
-                        "native_session_load_failed",
-                        identity=session_identity,
-                        native_session_id=resume_id,
-                        reason="acp_load_error_fallback_new",
-                    )
-                    _forget_persisted_session(session_identity)
-                    loaded_native = False
-                    _unlink_quietly(temp_paths)
-                    temp_paths = []
-                    prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
-                    sess = acp_bridge.AcpSession.create(
-                        exe=argv[0], model=model, tools=tools_registry,
-                        mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
-                        cwd=Config.cwd, registry=ACP_REGISTRY,
-                    )
+                sess = self._start_acp_turn(
+                    model=model,
+                    messages=messages,
+                    tools_registry=tools_registry,
+                    session_identity=session_identity,
+                    token=token,
+                    raw_results=raw_results,
+                    tail_msgs=tail_msgs,
+                    context_revision=context_revision,
+                )
             except (RuntimeError, acp_bridge.AcpError) as exc:
-                _unlink_quietly(temp_paths)
                 _observe_acp(
                     "native_session_open_failed",
                     identity=session_identity,
@@ -1595,6 +1565,98 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._error(502, f"Grok ACP 会话创建失败：{exc}")
                 return
+
+        live_resume_fallback = None
+        if live_tool_resumed:
+            def live_resume_fallback():
+                return self._start_acp_turn(
+                    model=model,
+                    messages=messages,
+                    tools_registry=tools_registry,
+                    session_identity=session_identity,
+                    token=token,
+                    raw_results=raw_results,
+                    tail_msgs=tail_msgs,
+                    context_revision=context_revision,
+                )
+
+        request_state = {
+            "digest": request_digest,
+            "message_hashes": current_hashes,
+        }
+        if stream:
+            if live_resume_fallback is None:
+                self._acp_stream(sess, model, prompt_preview, request_state)
+            else:
+                self._acp_stream(
+                    sess, model, prompt_preview, request_state, live_resume_fallback
+                )
+        else:
+            if live_resume_fallback is None:
+                self._acp_blocking(sess, model, prompt_preview, request_state)
+            else:
+                self._acp_blocking(
+                    sess, model, prompt_preview, request_state, live_resume_fallback
+                )
+
+    def _start_acp_turn(
+        self,
+        *,
+        model: str,
+        messages: List[Dict],
+        tools_registry: Dict[str, Dict[str, Any]],
+        session_identity: str,
+        token: Any,
+        raw_results: Dict[str, Any],
+        tail_msgs: List[Dict],
+        context_revision: str,
+    ):
+        """Create/load one ACP process and start the requested turn."""
+        temp_paths: List[str] = []
+        resume_id = _persisted_session(session_identity) if session_identity else ""
+        loaded_native = bool(resume_id)
+        argv = _resolve_cli_argv()
+        if resume_id and token:
+            prompt_text = _serialize_tool_resume(raw_results, tail_msgs, temp_paths)
+        elif resume_id:
+            prompt_text = _latest_user_turn(messages, temp_paths)
+        else:
+            prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
+        try:
+            _observe_acp(
+                "native_session_open",
+                identity=session_identity,
+                native_session_id=resume_id,
+                reason="load" if resume_id else "new",
+            )
+            try:
+                sess = acp_bridge.AcpSession.create(
+                    exe=argv[0], model=model, tools=tools_registry,
+                    mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
+                    cwd=Config.cwd, registry=ACP_REGISTRY,
+                    resume_session_id=resume_id,
+                )
+            except acp_bridge.AcpError:
+                if not resume_id:
+                    raise
+                _observe_acp(
+                    "native_session_load_failed",
+                    identity=session_identity,
+                    native_session_id=resume_id,
+                    reason="acp_load_error_fallback_new",
+                )
+                _forget_persisted_session(session_identity)
+                loaded_native = False
+                _unlink_quietly(temp_paths)
+                temp_paths = []
+                prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(
+                    messages, temp_paths
+                )
+                sess = acp_bridge.AcpSession.create(
+                    exe=argv[0], model=model, tools=tools_registry,
+                    mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
+                    cwd=Config.cwd, registry=ACP_REGISTRY,
+                )
             _observe_acp(
                 "native_session_ready",
                 identity=session_identity,
@@ -1607,15 +1669,13 @@ class Handler(BaseHTTPRequestHandler):
             sess.context_revision = context_revision
             sess.adopt_temp_paths(temp_paths)
             sess.start_turn(prompt_text)
-
-        request_state = {
-            "digest": request_digest,
-            "message_hashes": current_hashes,
-        }
-        if stream:
-            self._acp_stream(sess, model, prompt_preview, request_state)
-        else:
-            self._acp_blocking(sess, model, prompt_preview, request_state)
+            return sess
+        except Exception:
+            if sess is not None:
+                ACP_REGISTRY.drop(sess)
+            else:
+                _unlink_quietly(temp_paths)
+            raise
 
     def _acp_pump(self, sess, on_text, on_thought):
         """消费会话事件直到本请求可以收尾。
@@ -1779,6 +1839,7 @@ class Handler(BaseHTTPRequestHandler):
         model: str,
         prompt_preview: str,
         request_state: Dict[str, Any],
+        live_resume_fallback=None,
     ) -> None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
@@ -1811,6 +1872,7 @@ class Handler(BaseHTTPRequestHandler):
         seen_calls: set = set()
         collected = ""
         reasoning_all = ""
+        saw_live_output = False
 
         def emit_content(text: str) -> None:
             nonlocal collected
@@ -1828,15 +1890,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         def on_text(data: str) -> None:
+            nonlocal saw_live_output
+            saw_live_output = True
             emit_content(normalizer.feed(data))
 
         def on_thought(data: str) -> None:
+            nonlocal saw_live_output
+            saw_live_output = True
             reasoning_out, content_out = thought_norm.feed(data)
             emit_reasoning(reasoning_out)
             emit_content(content_out)
 
         try:
             outcome, data = self._acp_pump(sess, on_text, on_thought)
+            if outcome == "error" and live_resume_fallback is not None and not saw_live_output:
+                failed_session = sess
+                ACP_REGISTRY.drop(failed_session)
+                try:
+                    sess = live_resume_fallback()
+                    _observe_acp(
+                        "live_tool_resume_fallback",
+                        identity=sess.conversation_identity,
+                        native_session_id=sess.session_id,
+                        reason="process_ended_after_answer",
+                    )
+                    outcome, data = self._acp_pump(sess, on_text, on_thought)
+                except (RuntimeError, acp_bridge.AcpError) as exc:
+                    outcome, data = "error", f"ACP 恢复失败：{exc}"
             reasoning_out, content_out = thought_norm.flush()
             emit_reasoning(reasoning_out)
             emit_content(content_out)
@@ -1892,6 +1972,7 @@ class Handler(BaseHTTPRequestHandler):
         model: str,
         prompt_preview: str,
         request_state: Dict[str, Any],
+        live_resume_fallback=None,
     ) -> None:
         text_parts: List[str] = []
         thought_parts: List[str] = []
@@ -1899,6 +1980,23 @@ class Handler(BaseHTTPRequestHandler):
             outcome, data = self._acp_pump(
                 sess, text_parts.append, thought_parts.append
             )
+            if outcome == "error" and live_resume_fallback is not None:
+                ACP_REGISTRY.drop(sess)
+                try:
+                    sess = live_resume_fallback()
+                    _observe_acp(
+                        "live_tool_resume_fallback",
+                        identity=sess.conversation_identity,
+                        native_session_id=sess.session_id,
+                        reason="process_ended_after_answer",
+                    )
+                    text_parts.clear()
+                    thought_parts.clear()
+                    outcome, data = self._acp_pump(
+                        sess, text_parts.append, thought_parts.append
+                    )
+                except (RuntimeError, acp_bridge.AcpError) as exc:
+                    outcome, data = "error", f"ACP 恢复失败：{exc}"
         except (BrokenPipeError, ConnectionError):
             sess.cancel_turn()
             ACP_REGISTRY.drop(sess)
