@@ -120,6 +120,168 @@ ACP_SYSTEM_WRAPPER = (
 
 GATEWAY_FINGERPRINT = "grok-cli-gateway"
 
+# ACP stdio 进程是单轮的，但 Grok 会话本身可由 session/load 恢复。
+# 这里只持久化消息指纹和 Grok sessionId，不保存任何对话正文。
+_ACP_PERSISTED_LOCK = threading.Lock()
+_ACP_PERSISTED_PATH = os.path.join(RUNTIME_DIR, "acp_sessions.json")
+_ACP_PERSISTED: Dict[str, Dict[str, Any]] = {}
+_ACP_PERSISTED_MAX = 1000
+
+
+def _load_persisted_sessions() -> None:
+    try:
+        with open(_ACP_PERSISTED_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    loaded: Dict[str, Dict[str, Any]] = {}
+    for identity, raw in payload.items():
+        key = str(identity or "").strip()
+        if not key:
+            continue
+        entry = {"session_id": raw} if isinstance(raw, str) else raw
+        if isinstance(entry, dict) and str(entry.get("session_id") or "").strip():
+            loaded[key] = dict(entry)
+    with _ACP_PERSISTED_LOCK:
+        _ACP_PERSISTED.clear()
+        _ACP_PERSISTED.update(loaded)
+
+
+def _save_persisted_sessions_locked() -> None:
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    temp_path = f"{_ACP_PERSISTED_PATH}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(_ACP_PERSISTED, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, _ACP_PERSISTED_PATH)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except OSError:
+            pass
+
+
+def _remember_persisted_session(
+    identity: str,
+    session_id: str,
+    *,
+    model: str = "",
+    message_hashes: Optional[List[str]] = None,
+    context_revision: str = "",
+) -> None:
+    identity = str(identity or "").strip()
+    session_id = str(session_id or "").strip()
+    if not identity or not session_id:
+        return
+    entry = {
+        "session_id": session_id,
+        "model": str(model or "").strip(),
+        "message_hashes": [str(item) for item in (message_hashes or []) if item],
+        "context_revision": str(context_revision or "").strip(),
+        "updated_at": time.time(),
+    }
+    with _ACP_PERSISTED_LOCK:
+        _ACP_PERSISTED[identity] = entry
+        if len(_ACP_PERSISTED) > _ACP_PERSISTED_MAX:
+            oldest = sorted(
+                _ACP_PERSISTED,
+                key=lambda key: float(_ACP_PERSISTED[key].get("updated_at") or 0),
+            )[: len(_ACP_PERSISTED) - _ACP_PERSISTED_MAX]
+            for key in oldest:
+                _ACP_PERSISTED.pop(key, None)
+        _save_persisted_sessions_locked()
+
+
+def _persisted_session(identity: str) -> str:
+    with _ACP_PERSISTED_LOCK:
+        entry = _ACP_PERSISTED.get(str(identity or "").strip()) or {}
+        return str(entry.get("session_id") or "") if isinstance(entry, dict) else str(entry or "")
+
+
+def _persisted_context_revision(identity: str) -> str:
+    with _ACP_PERSISTED_LOCK:
+        entry = _ACP_PERSISTED.get(str(identity or "").strip()) or {}
+        return str(entry.get("context_revision") or "") if isinstance(entry, dict) else ""
+
+
+def _persisted_message_hashes(identity: str) -> List[str]:
+    with _ACP_PERSISTED_LOCK:
+        entry = _ACP_PERSISTED.get(str(identity or "").strip()) or {}
+        if not isinstance(entry, dict):
+            return []
+        return [str(item) for item in (entry.get("message_hashes") or []) if item]
+
+
+def _persisted_history_rewritten(identity: str, current_hashes: List[str], has_tool_token: bool) -> bool:
+    if has_tool_token:
+        return False
+    stored = _persisted_message_hashes(identity)
+    return bool(
+        stored
+        and (len(current_hashes) < len(stored) or current_hashes[: len(stored)] != stored)
+    )
+
+
+def _forget_persisted_session(identity: str) -> None:
+    with _ACP_PERSISTED_LOCK:
+        removed = _ACP_PERSISTED.pop(str(identity or "").strip(), None)
+        if removed is not None:
+            _save_persisted_sessions_locked()
+
+
+def _match_persisted_identity(messages: List[Dict], model: str) -> str:
+    current = _message_hashes(messages)
+    best_identity = ""
+    best_length = -1
+    best_updated = -1.0
+    with _ACP_PERSISTED_LOCK:
+        entries = list(_ACP_PERSISTED.items())
+    for identity, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        stored_model = str(entry.get("model") or "").strip()
+        if stored_model and model and stored_model != model:
+            continue
+        stored = [str(item) for item in (entry.get("message_hashes") or []) if item]
+        if not stored or len(current) < len(stored) or current[: len(stored)] != stored:
+            continue
+        updated = float(entry.get("updated_at") or 0)
+        if len(stored) > best_length or (len(stored) == best_length and updated > best_updated):
+            best_identity = identity
+            best_length = len(stored)
+            best_updated = updated
+    return best_identity
+
+
+def _resolve_session_identity(explicit: str, messages: List[Dict], model: str) -> str:
+    explicit = str(explicit or "").strip()
+    if explicit:
+        return explicit
+    matched = _match_persisted_identity(messages, model)
+    if matched:
+        return matched
+    anchor = _fingerprint({"model": model, "messages": _message_hashes(messages)})[:16]
+    return f"history-{anchor}-{uuid.uuid4().hex[:16]}"
+
+
+_load_persisted_sessions()
+
+
+def _latest_user_turn(messages: List[Dict], temporary_paths: List[str]) -> str:
+    start = 0
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if isinstance(msg, dict) and str(msg.get("role") or "").lower() == "user":
+            start = index
+            break
+    return _incremental_prompt(messages[start:], temporary_paths)
+
 
 # ---------------------------------------------------------------------------
 # grok 私有工具语法归一化
@@ -542,6 +704,23 @@ def _serialize_tail(tail_msgs: List[Dict], temporary_paths: List[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _serialize_tool_resume(
+    results: Dict[str, Any],
+    tail_msgs: List[Dict],
+    temporary_paths: List[str],
+) -> str:
+    """把工具回执作为同一 Grok 原生会话的新一轮输入。"""
+    parts = ["[工具执行结果]"]
+    for call_id, content in (results or {}).items():
+        text = _content_to_text(content, temporary_paths) or "（空结果）"
+        parts.append(f"{call_id}: {text}")
+    tail = _serialize_tail(tail_msgs, temporary_paths)
+    if tail:
+        parts.append("[追加消息]\n" + tail)
+    parts.append("请基于以上工具结果继续当前任务，不要重新开始或复述已有对话。")
+    return "\n\n".join(parts)
+
+
 def _history_response_message(message: Dict[str, Any]) -> Dict[str, Any]:
     """Return the part HeySure replays on the next request.
 
@@ -688,6 +867,8 @@ def run_cli_turn(model: str, messages: List[Dict]):
         CLI_SYSTEM_WRAPPER,
         "--cwd",
         Config.cwd,
+        "--reasoning-effort",
+        "max",
     ] + CLI_FIXED_ARGS
     if str(model or "").strip():
         full_argv += ["-m", str(model).strip()]
@@ -876,12 +1057,18 @@ class Handler(BaseHTTPRequestHandler):
         stream = bool(payload.get("stream"))
 
         tools = payload.get("tools")
-        use_acp = Config.acp_enabled and isinstance(tools, list) and bool(tools)
-        history_mode = self.headers.get("X-HeySure-History-Mode", "").strip().lower()
-        context_revision = self.headers.get("X-HeySure-Context-Revision", "").strip()
-        session_identity = "" if history_mode == "stateless" else str(
+        if not isinstance(tools, list):
+            tools = []
+        use_acp = bool(Config.acp_enabled)
+        explicit_identity = str(
             self.headers.get("X-HeySure-Session-ID", "") or payload.get("user") or ""
         ).strip()
+        history_mode = self.headers.get("X-HeySure-History-Mode", "").strip().lower()
+        context_revision = self.headers.get("X-HeySure-Context-Revision", "").strip()
+        session_identity = (
+            "" if history_mode == "stateless"
+            else _resolve_session_identity(explicit_identity, messages, model)
+        )
 
         prompt_preview = json.dumps(messages, ensure_ascii=False)
         try:
@@ -1110,47 +1297,31 @@ class Handler(BaseHTTPRequestHandler):
             "tool_choice": tool_choice,
         })
 
-        # HeySure 压缩会重写历史。上下文版本变化时必须关闭旧原生会话，
-        # 并用本次上传的摘要 + 最近消息全量创建新会话。
+        # Grok 1.0.0 的 ACP stdio 进程在一次工具调用上报后可能直接退出。
+        # 命中 tool_call token 时回收失效进程，但保留持久化 sessionId；随后
+        # session/load 同一个 Grok 原生会话，并把工具结果作为新增一轮继续输入。
+        sess = None
         if session_identity:
-            current = ACP_REGISTRY.get_by_identity(session_identity)
-            previous_revision = str(getattr(current, "context_revision", "") or "")
+            persisted_id = _persisted_session(session_identity)
+            previous_revision = _persisted_context_revision(session_identity)
             revision_changed = bool(
-                current is not None
+                persisted_id
                 and context_revision not in ("", "0")
                 and context_revision != previous_revision
             )
-            if current is not None and (history_mode == "replace" or revision_changed):
-                ACP_REGISTRY.drop(current)
-
-        # 恢复路径：tool_call id 里的会话 token 命中且挂起调用齐全 → 作答续跑。
-        sess = None
+            history_rewritten = bool(
+                persisted_id
+                and _persisted_history_rewritten(session_identity, current_hashes, bool(token))
+            )
+            if history_mode == "replace" or revision_changed or history_rewritten:
+                current = ACP_REGISTRY.get_by_identity(session_identity)
+                if current is not None:
+                    ACP_REGISTRY.drop(current)
+                _forget_persisted_session(session_identity)
         if token:
             cand = ACP_REGISTRY.get(token)
-            if (
-                cand is not None
-                and not cand.closed
-                and (not model or cand.model == model)
-                and (
-                    not session_identity
-                    or not cand.conversation_identity
-                    or cand.conversation_identity == session_identity
-                )
-                and cand.busy.acquire(blocking=False)
-            ):
-                results = {
-                    cid: _content_to_text(value, temp_paths)
-                    for cid, value in raw_results.items()
-                }
-                if cand.matches_results(results):
-                    cand.update_tools(tools_registry)
-                    if session_identity and not cand.conversation_identity:
-                        ACP_REGISTRY.bind_identity(cand, session_identity)
-                    cand.adopt_temp_paths(temp_paths)
-                    cand.answer_calls(results, _serialize_tail(tail_msgs, temp_paths))
-                    sess = cand
-                else:
-                    cand.busy.release()
+            if cand is not None:
+                ACP_REGISTRY.drop(cand)
 
         # 跨用户轮次续接：HeySure 的稳定会话 ID 命中且历史是追加式，
         # 则复用同一个 ACP session/prompt，只投喂新增消息。
@@ -1186,27 +1357,41 @@ class Handler(BaseHTTPRequestHandler):
                 elif acquired:
                     cand.busy.release()
 
-        # 新会话路径：首轮，或恢复失败（网关重启/会话过期/上下文被重写）→ 全量重放。
+        # stdio 进程每轮退出，但始终优先用持久化 sessionId 恢复真实会话。
         if sess is None:
             temp_paths = []
+            resume_id = _persisted_session(session_identity) if session_identity else ""
             try:
                 argv = _resolve_cli_argv()
-                prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
-                sess = acp_bridge.AcpSession.create(
-                    exe=argv[0],
-                    model=model,
-                    tools=tools_registry,
-                    mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
-                    cwd=Config.cwd,
-                    registry=ACP_REGISTRY,
-                )
+                if resume_id and token:
+                    prompt_text = _serialize_tool_resume(raw_results, tail_msgs, temp_paths)
+                elif resume_id:
+                    prompt_text = _latest_user_turn(messages, temp_paths)
+                else:
+                    prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
+                try:
+                    sess = acp_bridge.AcpSession.create(
+                        exe=argv[0], model=model, tools=tools_registry,
+                        mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
+                        cwd=Config.cwd, registry=ACP_REGISTRY,
+                        resume_session_id=resume_id,
+                    )
+                except acp_bridge.AcpError:
+                    if not resume_id:
+                        raise
+                    _forget_persisted_session(session_identity)
+                    _unlink_quietly(temp_paths)
+                    temp_paths = []
+                    prompt_text = ACP_SYSTEM_WRAPPER + "\n\n" + _serialize_convo(messages, temp_paths)
+                    sess = acp_bridge.AcpSession.create(
+                        exe=argv[0], model=model, tools=tools_registry,
+                        mcp_url_base=f"http://{Config.host}:{Config.port}/mcp",
+                        cwd=Config.cwd, registry=ACP_REGISTRY,
+                    )
             except (RuntimeError, acp_bridge.AcpError) as exc:
                 _unlink_quietly(temp_paths)
-                print(f"[acp] 会话创建失败，回退 headless 路径：{exc}")
-                if stream:
-                    self._handle_stream(model, messages, prompt_preview)
-                else:
-                    self._handle_blocking(model, messages, prompt_preview)
+                print(f"[acp] 会话创建失败：{exc}")
+                self._error(502, f"Grok ACP 会话创建失败：{exc}")
                 return
             if session_identity:
                 ACP_REGISTRY.bind_identity(sess, session_identity)
@@ -1460,6 +1645,11 @@ class Handler(BaseHTTPRequestHandler):
                     message["reasoning_content"] = reasoning_all
                 message["tool_calls"] = tool_calls
                 self._remember_acp_response(sess, request_state, message, "tool_calls")
+                _remember_persisted_session(
+                    sess.conversation_identity, sess.session_id, model=sess.model,
+                    message_hashes=sess.synced_message_hashes,
+                    context_revision=str(getattr(sess, "context_revision", "") or ""),
+                )
                 self._acp_park(sess)
                 return
 
@@ -1474,9 +1664,14 @@ class Handler(BaseHTTPRequestHandler):
                 if reasoning_all:
                     message["reasoning_content"] = reasoning_all
                 self._remember_acp_response(sess, request_state, message, "stop")
-                self._acp_park(sess)
-            else:
-                ACP_REGISTRY.drop(sess)
+                _remember_persisted_session(
+                    sess.conversation_identity, sess.session_id, model=sess.model,
+                    message_hashes=sess.synced_message_hashes,
+                    context_revision=str(getattr(sess, "context_revision", "") or ""),
+                )
+            # grok agent 在普通 end_turn 后会主动退出，不能跨用户轮次复用。
+            # 下一轮携完整历史新建 ACP session；工具调用路径仍会 park 等待结果。
+            ACP_REGISTRY.drop(sess)
         except (BrokenPipeError, ConnectionError):
             sess.cancel_turn()
             ACP_REGISTRY.drop(sess)
@@ -1536,10 +1731,21 @@ class Handler(BaseHTTPRequestHandler):
             self._remember_acp_response(
                 sess, request_state, message, "tool_calls"
             )
+            _remember_persisted_session(
+                sess.conversation_identity, sess.session_id, model=sess.model,
+                message_hashes=sess.synced_message_hashes,
+                context_revision=str(getattr(sess, "context_revision", "") or ""),
+            )
             self._acp_park(sess)
         elif outcome == "end" and sess.conversation_identity:
             self._remember_acp_response(sess, request_state, message, "stop")
-            self._acp_park(sess)
+            _remember_persisted_session(
+                sess.conversation_identity, sess.session_id, model=sess.model,
+                message_hashes=sess.synced_message_hashes,
+                context_revision=str(getattr(sess, "context_revision", "") or ""),
+            )
+            # 普通 end_turn 后进程已退出，移除失效 session。
+            ACP_REGISTRY.drop(sess)
         else:
             ACP_REGISTRY.drop(sess)
 

@@ -1,3 +1,5 @@
+import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -25,6 +27,37 @@ class StatefulAcpHelpersTest(unittest.TestCase):
             {"role": "assistant", "content": response_text},
             "stop",
         )
+
+    def test_acp_ignores_loaded_history_outside_active_turn(self):
+        sess = self.make_session()
+        old_update = {
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "previous answer"},
+            }},
+        }
+        current_update = {
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "current answer"},
+            }},
+        }
+
+        # session/load history replay happens before session/prompt.
+        sess._handle_notification(old_update)
+        self.assertTrue(sess.queue.empty())
+
+        with mock.patch.object(sess, "_rpc_send", return_value=7):
+            sess.start_turn("new question")
+        sess._handle_notification(current_update)
+        self.assertEqual(sess.queue.get_nowait(), ("text", "current answer"))
+
+        sess._handle_response({"id": 7, "result": {"stopReason": "end_turn"}})
+        self.assertEqual(sess.queue.get_nowait(), ("end", "end_turn"))
+        sess._handle_notification(old_update)
+        self.assertTrue(sess.queue.empty())
 
     def test_append_only_history_resumes_after_previous_answer(self):
         sess = self.make_session()
@@ -59,6 +92,28 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         rewritten = [{"role": "user", "content": "compressed context"}]
         self.assertIsNone(server._resume_message_index(sess, rewritten))
 
+    def test_shortened_persisted_history_is_treated_as_rewrite(self):
+        identity = "recall-session"
+        original = dict(server._ACP_PERSISTED)
+        try:
+            server._ACP_PERSISTED.clear()
+            server._ACP_PERSISTED[identity] = {
+                "session_id": "native-session",
+                "message_hashes": ["one", "two", "three"],
+            }
+            self.assertFalse(server._persisted_history_rewritten(
+                identity, ["one", "two", "three", "four"], False
+            ))
+            self.assertTrue(server._persisted_history_rewritten(
+                identity, ["one"], False
+            ))
+            self.assertFalse(server._persisted_history_rewritten(
+                identity, ["one"], True
+            ))
+        finally:
+            server._ACP_PERSISTED.clear()
+            server._ACP_PERSISTED.update(original)
+
     def test_registry_identity_is_removed_when_session_drops(self):
         registry = acp_bridge.SessionRegistry(ttl=60, max_sessions=2)
         sess = self.make_session()
@@ -80,6 +135,91 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         self.assertTrue(old.closed)
         self.assertIs(registry.get_by_identity("same-chat"), new)
         registry.drop(new)
+
+    def test_uploaded_history_recovers_identity_without_header(self):
+        initial = [
+            {"role": "system", "content": "stable system"},
+            {"role": "user", "content": "first"},
+        ]
+        response = {"role": "assistant", "content": "first answer"}
+        follow_up = initial + [response, {"role": "user", "content": "second"}]
+        with server._ACP_PERSISTED_LOCK:
+            previous = dict(server._ACP_PERSISTED)
+            server._ACP_PERSISTED.clear()
+        try:
+            with mock.patch.object(server, "_save_persisted_sessions_locked"):
+                identity = server._resolve_session_identity("", initial, "grok-4.5")
+                synced = server._message_hashes(initial) + [server._fingerprint(response)]
+                server._remember_persisted_session(
+                    identity, "grok-session", model="grok-4.5",
+                    message_hashes=synced,
+                )
+                self.assertEqual(
+                    server._resolve_session_identity("", follow_up, "grok-4.5"),
+                    identity,
+                )
+                self.assertNotEqual(
+                    server._resolve_session_identity("", initial, "grok-4.5"),
+                    identity,
+                )
+        finally:
+            with server._ACP_PERSISTED_LOCK:
+                server._ACP_PERSISTED.clear()
+                server._ACP_PERSISTED.update(previous)
+
+    def test_explicit_identity_has_priority_over_uploaded_history(self):
+        self.assertEqual(
+            server._resolve_session_identity(
+                "heysure-stable", [{"role": "user", "content": "x"}], "grok-4.5"
+            ),
+            "heysure-stable",
+        )
+
+    def test_tool_result_loads_same_persisted_grok_session(self):
+        registry = acp_bridge.SessionRegistry(ttl=60, max_sessions=2)
+        handler = object.__new__(server.Handler)
+        created = []
+
+        def fake_create(**kwargs):
+            sess = self.make_session()
+            sess.session_id = kwargs.get("resume_session_id") or "new-session"
+            sess.prompts = []
+            sess.start_turn = sess.prompts.append
+            kwargs["registry"].add(sess)
+            created.append((sess, kwargs))
+            return sess
+
+        messages = [
+            {"role": "user", "content": "send it"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_deadbeef-1",
+                    "type": "function",
+                    "function": {"name": "demo", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_deadbeef-1", "content": "ok"},
+        ]
+        with mock.patch.object(server, "ACP_REGISTRY", registry), mock.patch.object(
+            server, "_persisted_session", return_value="same-native-session"
+        ), mock.patch.object(
+            server, "_resolve_cli_argv", return_value=["grok"]
+        ), mock.patch.object(
+            acp_bridge.AcpSession, "create", side_effect=fake_create
+        ), mock.patch.object(
+            server.Handler, "_acp_blocking", lambda *_args: None
+        ):
+            handler._handle_acp_chat(
+                "grok-4.5", messages, [], False, "preview", "stable-chat", None
+            )
+
+        sess, kwargs = created[0]
+        self.assertEqual(kwargs["resume_session_id"], "same-native-session")
+        self.assertEqual(sess.session_id, "same-native-session")
+        self.assertIn("call_deadbeef-1: ok", sess.prompts[0])
+        registry.drop(sess)
 
     def test_handler_reuses_live_acp_and_sends_only_delta(self):
         registry = acp_bridge.SessionRegistry(ttl=60, max_sessions=2)
@@ -151,59 +291,30 @@ class StatefulAcpHelpersTest(unittest.TestCase):
         )
         registry.drop(created[0])
 
-    def test_context_revision_drops_old_session_and_replays_compressed_history(self):
-        registry = acp_bridge.SessionRegistry(ttl=60, max_sessions=3)
+
+class AlwaysAcpRoutingTest(unittest.TestCase):
+    def test_request_without_tools_still_uses_acp(self):
+        payload = {
+            "model": "grok-4.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        }
+        body = json.dumps(payload).encode("utf-8")
         handler = object.__new__(server.Handler)
-        created = []
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler._path = lambda: "/v1/chat/completions"
+        handler._check_auth = lambda: True
+        handler._handle_acp_chat = mock.Mock()
+        handler._handle_stream = mock.Mock(side_effect=AssertionError("headless stream used"))
+        handler._handle_blocking = mock.Mock(side_effect=AssertionError("headless blocking used"))
 
-        def fake_create(**kwargs):
-            token = f"{len(created) + 1:08x}"
-            sess = acp_bridge.AcpSession(token, "grok-4.5")
-            sess.prompts = []
-            sess.start_turn = sess.prompts.append
-            kwargs["registry"].add(sess)
-            created.append(sess)
-            return sess
+        handler.do_POST()
 
-        def fake_blocking(this, sess, _model, _preview, request_state):
-            this._remember_acp_response(
-                sess,
-                request_state,
-                {"role": "assistant", "content": "answer"},
-                "stop",
-            )
-            this._acp_park(sess)
-
-        tools = [{
-            "type": "function",
-            "function": {"name": "demo", "parameters": {"type": "object"}},
-        }]
-        first = [{"role": "user", "content": "原问题"}]
-        compressed = [
-            {"role": "system", "content": "历史摘要：代号青鸟"},
-            {"role": "user", "content": "代号是什么？"},
-        ]
-        with mock.patch.object(server, "ACP_REGISTRY", registry), mock.patch.object(
-            server, "_resolve_cli_argv", return_value=["grok"]
-        ), mock.patch.object(
-            acp_bridge.AcpSession, "create", side_effect=fake_create
-        ), mock.patch.object(
-            server.Handler, "_acp_blocking", fake_blocking
-        ):
-            handler._handle_acp_chat(
-                "grok-4.5", first, tools, False, "first", "stable-chat", None,
-                "full", "0",
-            )
-            handler._handle_acp_chat(
-                "grok-4.5", compressed, tools, False, "compressed", "stable-chat", None,
-                "full", "revision-2",
-            )
-
-        self.assertEqual(len(created), 2)
-        self.assertTrue(created[0].closed)
-        self.assertIn("历史摘要：代号青鸟", created[1].prompts[0])
-        self.assertEqual(created[1].context_revision, "revision-2")
-        registry.drop(created[1])
+        handler._handle_acp_chat.assert_called_once()
+        args = handler._handle_acp_chat.call_args.args
+        self.assertEqual(args[2], [])
+        self.assertTrue(args[5].startswith("history-"))
 
 
 class HandlerDisconnectTest(unittest.TestCase):

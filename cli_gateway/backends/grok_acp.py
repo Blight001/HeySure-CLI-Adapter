@@ -107,6 +107,10 @@ class AcpSession:
         self._turn_rpc_id: Optional[int] = None
         self._inflight: Dict[int, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        # session/load may replay historical agent_message/thought chunks before
+        # the next session/prompt begins. Only notifications belonging to an
+        # explicitly active turn may reach the OpenAI response queue.
+        self._accept_turn_updates = False
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -123,6 +127,7 @@ class AcpSession:
         cwd: str,
         registry: "SessionRegistry",
         init_timeout: float = 60.0,
+        resume_session_id: str = "",
     ) -> "AcpSession":
         """spawn + initialize + session/new。失败抛 AcpError（进程已清理）。
 
@@ -139,6 +144,8 @@ class AcpSession:
         argv = [exe, "agent"]
         if str(model or "").strip():
             argv += ["-m", str(model).strip()]
+        # 服务端固定使用 Grok CLI 支持的最高推理档位，不接受 API 覆盖。
+        argv += ["--reasoning-effort", "max"]
         # 7×24 全自动项目：不要任何工具确认环节，全部自动放行。
         argv += ["--always-approve", "--no-leader", "stdio"]
 
@@ -173,19 +180,27 @@ class AcpSession:
                 },
                 timeout=init_timeout,
             )
-            result = sess._rpc_request(
-                "session/new",
-                {
-                    "cwd": os.path.abspath(cwd),
-                    "mcpServers": [
-                        {"type": "http", "name": "heysure", "url": mcp_url, "headers": []}
-                    ],
-                },
-                timeout=init_timeout,
-            )
-            sess.session_id = str(result.get("sessionId") or "")
-            if not sess.session_id:
-                raise AcpError(f"session/new 未返回 sessionId：{result}")
+            session_params = {
+                "cwd": os.path.abspath(cwd),
+                "mcpServers": [
+                    {"type": "http", "name": "heysure", "url": mcp_url, "headers": []}
+                ],
+            }
+            if resume_session_id:
+                session_params["sessionId"] = str(resume_session_id)
+                result = sess._rpc_request(
+                    "session/load", session_params, timeout=init_timeout
+                )
+                # ACP session/load 通常返回空对象；沿用请求中的持久化 ID。
+                sess.session_id = str(result.get("sessionId") or resume_session_id)
+                _dbg(f"session {token} loaded persisted sid={sess.session_id}")
+            else:
+                result = sess._rpc_request(
+                    "session/new", session_params, timeout=init_timeout
+                )
+                sess.session_id = str(result.get("sessionId") or "")
+                if not sess.session_id:
+                    raise AcpError(f"session/new 未返回 sessionId：{result}")
         except AcpError:
             registry.drop(sess)
             raise
@@ -214,6 +229,15 @@ class AcpSession:
         try:
             if self.proc and self.proc.poll() is None:
                 self.proc.kill()
+            if self.proc:
+                # poll/kill 不会回收子进程；显式 wait 防止断连后积累僵尸进程。
+                self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
         except Exception:
             pass
         for path in self.temp_paths:
@@ -237,13 +261,20 @@ class AcpSession:
 
     def start_turn(self, prompt_text: str) -> None:
         """发起 session/prompt（异步）；结束经 queue 的 ("end", ...) 到达。"""
-        rpc_id = self._rpc_send(
-            "session/prompt",
-            {
-                "sessionId": self.session_id,
-                "prompt": [{"type": "text", "text": prompt_text}],
-            },
-        )
+        with self._lock:
+            self._accept_turn_updates = True
+        try:
+            rpc_id = self._rpc_send(
+                "session/prompt",
+                {
+                    "sessionId": self.session_id,
+                    "prompt": [{"type": "text", "text": prompt_text}],
+                },
+            )
+        except Exception:
+            with self._lock:
+                self._accept_turn_updates = False
+            raise
         self._turn_rpc_id = rpc_id
         self.last_used = time.time()
 
@@ -421,6 +452,8 @@ class AcpSession:
             return
         if rpc_id == self._turn_rpc_id:
             self._turn_rpc_id = None
+            with self._lock:
+                self._accept_turn_updates = False
             if msg.get("error"):
                 self.queue.put(("error", f"session/prompt 出错：{msg['error']}"))
             else:
@@ -431,6 +464,9 @@ class AcpSession:
         method = str(msg.get("method") or "")
         if method != "session/update":
             return  # _x.ai/* 等系统通知一律忽略
+        with self._lock:
+            if not self._accept_turn_updates:
+                return
         params = msg.get("params") or {}
         update = params.get("update") or {}
         kind = str(update.get("sessionUpdate") or "")
