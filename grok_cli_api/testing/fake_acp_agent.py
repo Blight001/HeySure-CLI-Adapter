@@ -38,7 +38,7 @@ def mcp_call(url):
         return json.loads(response.read().decode("utf-8"))
 
 
-def finish_prompt(rpc_id):
+def finish_prompt(rpc_id, message_text="Continued after the tool result."):
     emit({
         "jsonrpc": "2.0",
         "method": "session/update",
@@ -52,7 +52,7 @@ def finish_prompt(rpc_id):
         "method": "session/update",
         "params": {"update": {
             "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": "Continued after the tool result."},
+            "content": {"type": "text", "text": message_text},
         }},
     })
     emit({
@@ -96,10 +96,16 @@ def main():
                 if isinstance(item, dict)
             )
             if "[工具执行结果]" not in prompt:
-                mcp_call(mcp_url)
+                result = mcp_call(mcp_url)
                 if os.environ.get("GROK_FAKE_ACP_EXIT_AFTER_RESULT") == "1":
                     return
-                finish_prompt(rpc_id)
+                result_text = json.dumps(result, ensure_ascii=False)
+                message_text = (
+                    "Continued after the tool result."
+                    if "The user wants" in result_text and "同一个任务正在继续" in result_text
+                    else "MISSING LIVE CONTINUITY INSTRUCTION"
+                )
+                finish_prompt(rpc_id, message_text)
                 continue
             finish_prompt(rpc_id)
 

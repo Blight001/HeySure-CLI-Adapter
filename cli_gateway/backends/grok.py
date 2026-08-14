@@ -100,6 +100,13 @@ CLI_SYSTEM_WRAPPER = (
 
 _ROLE_LABELS = {"user": "User", "assistant": "Assistant", "tool": "Tool Result"}
 
+ACP_TOOL_CONTINUE_INSTRUCTION = (
+    "这是上一轮工具调用的直接回执，不是新的用户请求；同一个任务正在继续。"
+    "请直接从工具结果的含义和下一步动作开始推理并继续执行，不要重新开始或复述"
+    "已有对话。推理中禁止使用 ‘The user wants…’、‘用户让我…’、‘I need to…’、"
+    "‘Let me…’ 等重新陈述任务的开场句。"
+)
+
 # ACP（agent stdio）路径的提示包装。与 headless 不同：平台工具此时是**真实注册**
 # 的 MCP 工具（heysure server），必须引导模型直接调用而不是手写文本标记；agent
 # 模式没有 --system-prompt-override，包装直接置于 prompt 文本顶部。
@@ -747,13 +754,22 @@ def _serialize_tool_resume(
     tail = _serialize_tail(tail_msgs, temporary_paths)
     if tail:
         parts.append("[追加消息]\n" + tail)
-    parts.append(
-        "这是上一轮工具调用的直接回执，不是新的用户请求；同一个任务正在继续。"
-        "请直接从工具结果的含义和下一步动作开始推理并继续执行，不要重新开始或复述"
-        "已有对话。推理中禁止使用 ‘The user wants…’、‘用户让我…’、‘I need to…’、"
-        "‘Let me…’ 等重新陈述任务的开场句。"
-    )
+    parts.append(ACP_TOOL_CONTINUE_INSTRUCTION)
     return "\n\n".join(parts)
+
+
+def _serialize_live_tool_tail(
+    tail_msgs: List[Dict], temporary_paths: List[str]
+) -> str:
+    """Instruction appended to a live pending MCP result.
+
+    A live ACP process does not receive a new session/prompt, so the continuity
+    instruction used by the load path must travel with the MCP response itself.
+    """
+    tail = _serialize_tail(tail_msgs, temporary_paths)
+    if tail:
+        return f"{tail}\n\n{ACP_TOOL_CONTINUE_INSTRUCTION}"
+    return ACP_TOOL_CONTINUE_INSTRUCTION
 
 
 def _history_response_message(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -1447,7 +1463,9 @@ class Handler(BaseHTTPRequestHandler):
                         cand.adopt_temp_paths(temp_paths)
                         temp_paths = []
                         cand.answer_calls(
-                            results, _serialize_tail(tail_msgs, cand.temp_paths)
+                            results, _serialize_live_tool_tail(
+                                tail_msgs, cand.temp_paths
+                            )
                         )
                         sess = cand
                         live_tool_resumed = True
