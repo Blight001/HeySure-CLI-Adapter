@@ -172,7 +172,8 @@ class AcpContinuityIntegrationTest(unittest.TestCase):
         )
         resumed_prompt = prompts[-1]["params"]["prompt"][0]["text"]
         self.assertIn("Seoul is healthy", resumed_prompt)
-        self.assertIn("继续当前任务", resumed_prompt)
+        self.assertIn("同一个任务正在继续", resumed_prompt)
+        self.assertIn("The user wants", resumed_prompt)
         self.assertNotIn("Check Seoul, then report.", resumed_prompt)
 
     def test_tool_result_continues_the_same_live_prompt(self):

@@ -747,7 +747,12 @@ def _serialize_tool_resume(
     tail = _serialize_tail(tail_msgs, temporary_paths)
     if tail:
         parts.append("[追加消息]\n" + tail)
-    parts.append("请基于以上工具结果继续当前任务，不要重新开始或复述已有对话。")
+    parts.append(
+        "这是上一轮工具调用的直接回执，不是新的用户请求；同一个任务正在继续。"
+        "请直接从工具结果的含义和下一步动作开始推理并继续执行，不要重新开始或复述"
+        "已有对话。推理中禁止使用 ‘The user wants…’、‘用户让我…’、‘I need to…’、"
+        "‘Let me…’ 等重新陈述任务的开场句。"
+    )
     return "\n\n".join(parts)
 
 
