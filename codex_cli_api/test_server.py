@@ -169,6 +169,20 @@ class CodexGatewayTests(unittest.TestCase):
         self.assertIn("<mcp-call>", prompt)
         self.assertIn("--sandbox", run.call_args.args[0])
 
+    def test_native_mcp_mode_uses_codex_tools_without_xml_protocol(self):
+        payload = {
+            "user": "native-mcp",
+            "_heysure_native_mcp": True,
+            "messages": [{"role": "user", "content": "检查服务器"}],
+            "tools": [{"type": "function", "function": {"name": "legacy.tool"}}],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
+            server.CodexGateway().complete(payload)
+        prompt = run.call_args.kwargs["input"]
+        self.assertIn("直接调用 heysure MCP", prompt)
+        self.assertNotIn("<mcp-call>", prompt)
+        self.assertNotIn("legacy.tool", prompt)
+
     def test_cli_failure_is_gateway_error(self):
         failed = mock.Mock(returncode=1, stdout="", stderr="not logged in")
         with mock.patch.object(server.subprocess, "run", return_value=failed):

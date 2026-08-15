@@ -58,6 +58,11 @@ HeySure 平台工具不是你本机可直接调用的 Codex 工具。若需要�
 不要声称已经调用了未通过上述文本块调用的工具，也不要用本机 shell 模拟平台工具。若无需工具，正常回答即可。
 """
 
+NATIVE_MCP_SYSTEM_WRAPPER = """你正在作为 HeySure 的外部数字成员响应用户，而不是在帮助用户修改当前桥接器代码。
+当前 Codex 已配置该成员的 HeySure MCP。需要读取服务器或设备状态、执行动作时，直接调用 heysure MCP 工具并检查真实结果；不要输出 XML 工具协议，也不要声称执行了未实际调用的动作。
+最终只输出要发送给用户的回复正文，不要调用 heysure.reply_message；桥接器会负责恰好一次提交回复。
+"""
+
 _ROLE_NAMES = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool Result"}
 _LOCKS: Dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -128,8 +133,11 @@ def _canonical_messages(messages: Any) -> List[Dict[str, Any]]:
     return result
 
 
-def _render_messages(messages: List[Dict[str, Any]], include_wrapper: bool) -> str:
-    chunks = [SYSTEM_WRAPPER.strip()] if include_wrapper else []
+def _render_messages(
+    messages: List[Dict[str, Any]], include_wrapper: bool, native_mcp: bool = False
+) -> str:
+    wrapper = NATIVE_MCP_SYSTEM_WRAPPER if native_mcp else SYSTEM_WRAPPER
+    chunks = [wrapper.strip()] if include_wrapper else []
     if include_wrapper:
         chunks.append("[对话记录]")
     for message in messages:
@@ -322,8 +330,10 @@ class CodexGateway:
                 generation += 1
             workspace = os.path.join(root, f"generation-{generation:06d}")
             delta = messages[len(previous) :] if can_resume else messages
-            prompt = _render_messages(delta, include_wrapper=not can_resume)
-            prompt += _render_tools(payload.get("tools"))
+            native_mcp = bool(payload.get("_heysure_native_mcp"))
+            prompt = _render_messages(delta, include_wrapper=not can_resume, native_mcp=native_mcp)
+            if not native_mcp:
+                prompt += _render_tools(payload.get("tools"))
             prompt += "\n\nAssistant:"
             thread_id, answer, usage = _run_codex(
                 prompt,

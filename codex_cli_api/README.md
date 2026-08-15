@@ -148,3 +148,27 @@ HeySure 发送的 `X-HeySure-Session-ID` 会映射为独立 Codex thread。正�
 ```bash
 python -m unittest -v test_server.py
 ```
+
+## 作为 HeySure 外部数字成员常驻对话
+
+服务器支持 `heysure.claim_message` / `heysure.reply_message` 后，本机可以主动领取
+网页或机器人发给外部成员的消息。此模式只建立电脑到服务器的出站 HTTPS 连接，不开放
+本机端口；每个 HeySure 会话映射为一个持续的 Codex thread。
+
+先把成员控制文档中的 Token 放入环境变量，再启动：
+
+```powershell
+$env:HEYSURE_CONTROLLER_TOKEN = '控制文档中一次性显示的 Token'
+run.bat controller --endpoint https://你的域名/mcp/external
+```
+
+控制文档使用成员专属环境变量名时，用 `--token-env` 指定：
+
+```powershell
+run.bat controller --endpoint https://你的域名/mcp/external `
+  --token-env HEYSURE_CONTROLLER_TOKEN_19
+```
+
+桥接器领取消息时使用 30 分钟租约，成功后恰好一次写回助手消息；失败会把 turn 置为
+终态并记录脱敏错误。Codex CLI 必须是普通终端可执行的独立安装版本；仅能由 Windows
+Store 应用内部启动、在 PowerShell 中显示“拒绝访问”的内嵌可执行文件不能用作桥接器。
