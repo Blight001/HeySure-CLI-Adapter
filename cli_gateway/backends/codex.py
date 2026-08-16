@@ -45,6 +45,11 @@ class Config:
     # Optional manual override.  Empty means: discover from the installed CLI.
     models = [x.strip() for x in os.environ.get("CODEX_CLI_MODELS", "").split(",") if x.strip()]
     sandbox = os.environ.get("CODEX_CLI_SANDBOX", "read-only")
+    # Optional fixed project directory for Codex execution.  Session metadata
+    # remains isolated under ``sessions_dir`` while Codex reads and edits this
+    # workspace directly.
+    workspace = os.path.abspath(os.path.expanduser(os.environ["CODEX_CLI_CWD"])) \
+        if os.environ.get("CODEX_CLI_CWD") else ""
     sessions_dir = os.path.abspath(
         os.path.expanduser(os.environ.get("CODEX_CLI_SESSIONS_DIR", os.path.join(RUNTIME_DIR, "sessions")))
     )
@@ -328,7 +333,7 @@ class CodexGateway:
             generation = int(state.get("generation") or 0)
             if not can_resume:
                 generation += 1
-            workspace = os.path.join(root, f"generation-{generation:06d}")
+            workspace = Config.workspace or os.path.join(root, f"generation-{generation:06d}")
             delta = messages[len(previous) :] if can_resume else messages
             native_mcp = bool(payload.get("_heysure_native_mcp"))
             prompt = _render_messages(delta, include_wrapper=not can_resume, native_mcp=native_mcp)
@@ -475,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=Config.api_key)
     parser.add_argument("--models", default=",".join(Config.models), help="optional comma-separated override; empty discovers from Codex CLI")
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write", "danger-full-access"), default=Config.sandbox)
+    parser.add_argument("--workspace", default=Config.workspace, help="optional fixed Codex working directory")
     parser.add_argument("--sessions-dir", default=Config.sessions_dir)
     return parser
 
@@ -488,7 +494,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     Config.api_key = args.api_key
     Config.models = [x.strip() for x in args.models.split(",") if x.strip()]
     Config.sandbox = args.sandbox
+    Config.workspace = os.path.abspath(os.path.expanduser(args.workspace)) if args.workspace else ""
     Config.sessions_dir = os.path.abspath(os.path.expanduser(args.sessions_dir))
+    if Config.workspace:
+        os.makedirs(Config.workspace, exist_ok=True)
     os.makedirs(Config.sessions_dir, exist_ok=True)
     models = discover_models(refresh=True)
     server = ThreadingHTTPServer((Config.host, Config.port), Handler)

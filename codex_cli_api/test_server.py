@@ -9,7 +9,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest import mock
 
-import server
+from cli_gateway.backends import codex as server
 
 
 def codex_result(thread="12345678-1234-1234-1234-123456789abc", text="测试成功"):
@@ -25,10 +25,13 @@ class CodexGatewayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.saved_dir = server.Config.sessions_dir
+        self.saved_workspace = server.Config.workspace
         server.Config.sessions_dir = self.temp.name
+        server.Config.workspace = ""
 
     def tearDown(self):
         server.Config.sessions_dir = self.saved_dir
+        server.Config.workspace = self.saved_workspace
         self.temp.cleanup()
 
     def test_jsonl_parser(self):
@@ -70,6 +73,18 @@ class CodexGatewayTests(unittest.TestCase):
         self.assertNotIn("--model", run.call_args.args[0])
         self.assertNotIn("model_reasoning_effort", " ".join(run.call_args.args[0]))
         self.assertEqual(result["model"], "codex-default")
+
+    def test_configured_workspace_is_codex_working_directory(self):
+        project = os.path.join(self.temp.name, "project")
+        server.Config.workspace = project
+        payload = {
+            "user": "project-session",
+            "messages": [{"role": "user", "content": "inspect project"}],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=codex_result()) as run:
+            server.CodexGateway().complete(payload)
+        self.assertEqual(run.call_args.kwargs["cwd"], project)
+        self.assertTrue(os.path.isdir(project))
 
     def test_explicit_reasoning_effort_is_forwarded_to_codex_cli(self):
         payload = {

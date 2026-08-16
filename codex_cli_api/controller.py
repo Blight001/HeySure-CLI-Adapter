@@ -132,12 +132,22 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--command", default=os.getenv("CODEX_CLI_COMMAND", Config.command))
     parser.add_argument("--workspace", default=os.getenv("CODEX_CLI_CWD", str(CLI_ROOT)))
+    parser.add_argument("--sessions-dir", default=os.getenv("CODEX_CLI_SESSIONS_DIR", ""))
+    parser.add_argument(
+        "--sandbox",
+        choices=("read-only", "workspace-write", "danger-full-access"),
+        default=os.getenv("CODEX_CLI_SANDBOX", Config.sandbox),
+    )
     args = parser.parse_args()
     token = os.getenv(args.token_env, "").strip()
     if not args.endpoint or not token:
         parser.error(f"--endpoint and token environment variable {args.token_env} are required")
     Config.command = args.command
-    Config.sessions_dir = os.path.abspath(os.path.join(args.workspace, ".heysure-codex-sessions"))
+    Config.workspace = os.path.abspath(args.workspace)
+    Config.sessions_dir = os.path.abspath(
+        args.sessions_dir or os.path.join(Config.workspace, ".heysure-codex-sessions")
+    )
+    Config.sandbox = args.sandbox
     client = HeySureController(args.endpoint, token)
     gateway = CodexGateway()
     context = client.call("heysure.get_context")

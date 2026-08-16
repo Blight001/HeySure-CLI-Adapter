@@ -112,6 +112,7 @@ HeySure 发送的 `X-HeySure-Session-ID` 会映射为独立 Codex thread。正�
 | `CODEX_CLI_API_KEY` / `--api-key` | 空 | 网关 Bearer 鉴权密钥 |
 | `CODEX_CLI_MODELS` / `--models` | 空 | 可选人工覆盖；默认通过 `codex debug models` 动态发现并缓存 5 分钟 |
 | `CODEX_CLI_SANDBOX` / `--sandbox` | `read-only` | Codex 本机工具沙箱 |
+| `CODEX_CLI_CWD` / `--workspace` | 空 | 可选固定项目工作目录；设置后 Codex 直接在该目录读取或修改文件 |
 | `CODEX_CLI_SESSIONS_DIR` / `--sessions-dir` | `runtime/sessions` | thread 映射与缓存目录 |
 
 推荐用与 Grok 相同的持久化开放命令：
@@ -167,6 +168,17 @@ run.bat controller --endpoint https://你的域名/mcp/external
 ```powershell
 run.bat controller --endpoint https://你的域名/mcp/external `
   --token-env HEYSURE_CONTROLLER_TOKEN_19
+```
+
+需要让外部成员在一个本地项目中持续排查和修改代码时，显式指定工作区、会话目录和
+最小写权限。会话目录包含对话历史，必须加入项目的 `.gitignore`：
+
+```powershell
+run.bat controller --endpoint https://你的域名/mcp/external `
+  --token-env HEYSURE_CONTROLLER_TOKEN_19 `
+  --workspace D:\path\to\project `
+  --sessions-dir D:\path\to\project\.heysure-codex-sessions `
+  --sandbox workspace-write
 ```
 
 桥接器领取消息时使用 30 分钟租约，成功后恰好一次写回助手消息；失败会把 turn 置为
