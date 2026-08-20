@@ -13,7 +13,7 @@
 
   <form id="configForm">
     <section id="heysurePage" class="page active"><div class="layout">
-      <div class="card"><h2>HeySure 账号</h2><label>服务器地址</label><input id="server" required placeholder="http://127.0.0.1:3000"><div class="row"><div><label>账号（可选）</label><input id="account" autocomplete="username"></div><div><label>密码</label><input id="password" type="password" autocomplete="current-password" placeholder="留空保持不变"></div></div><p class="muted" style="margin-top:10px">不填写账号密码时，统一 API 仍可独立使用。</p></div>
+      <div class="card"><h2>HeySure 账号</h2><label>服务器地址</label><input id="server" required placeholder="默认读取 device.config.json"><div class="row"><div><label>账号（可选）</label><input id="account" autocomplete="username"></div><div><label>密码</label><input id="password" type="password" autocomplete="current-password" placeholder="留空保持不变"></div></div><p class="muted" style="margin-top:10px">不填写账号密码时，统一 API 仍可独立使用。</p></div>
       <div class="card"><h2>设备身份</h2><label>稳定设备 ID</label><input id="deviceId" required><label>设备展示名称</label><input id="name" required><p class="muted" style="margin-top:12px">填写账号密码后会自动连接 HeySure；统一 API 的启停在独立栏目中管理。</p></div>
       <div class="card span2 hero-card"><p class="hint">连接后，在 HeySure“作坊”给此设备分配 AI，并授权 <code>cli.run</code>、<code>cli.models</code>、<code>cli.status</code>。AI 可按模型自动路由，也可主动指定 CLI 平台。</p><div class="actions" style="margin-top:13px"><span id="message" class="message">保存时会验证账号并连接 HeySure</span><button type="submit" data-save-scope="heysure">保存并登录 HeySure</button></div></div>
     </div></section>

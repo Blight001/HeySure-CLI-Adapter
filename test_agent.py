@@ -12,6 +12,18 @@ SPEC.loader.exec_module(agent)
 
 
 class ConfigTests(unittest.TestCase):
+    def test_default_server_uses_shared_device_config(self):
+        with patch.dict(agent.os.environ, {}, clear=True):
+            self.assertEqual(agent._default_config()["server"], "http://49.234.181.190:58150")
+
+    def test_local_server_requires_explicit_test_mode(self):
+        with patch.dict(agent.os.environ, {"HEYSURE_LOCAL_TEST": "true"}, clear=True):
+            self.assertEqual(agent._default_config()["server"], "http://127.0.0.1:3000")
+
+    def test_explicit_server_overrides_shared_config(self):
+        with patch.dict(agent.os.environ, {"HEYSURE_SERVER": "https://custom.example"}, clear=True):
+            self.assertEqual(agent._default_config()["server"], "https://custom.example")
+
     def test_heysure_server_url_accepts_host_and_adds_http_scheme(self):
         self.assertEqual(agent._server_url("example.com:3000/"), "http://example.com:3000")
 

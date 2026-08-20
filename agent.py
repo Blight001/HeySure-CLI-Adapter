@@ -41,6 +41,21 @@ VERSION = "2.0.0"
 PLATFORMS = ("codex", "grok", "antigravity")
 DEFAULT_COMMANDS = {"codex": "codex", "grok": "grok", "antigravity": "agy"}
 DEFAULT_PORTS = {"codex": 8120, "grok": 8100, "antigravity": 8110}
+DEVICE_CONFIG_PATH = BASE_DIR.parent / "device.config.json"
+PRODUCTION_SERVER_FALLBACK = "http://49.234.181.190:58150"
+LOCAL_TEST_SERVER_FALLBACK = "http://127.0.0.1:3000"
+
+
+def _configured_server_url() -> str:
+    try:
+        device_config = json.loads(DEVICE_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        device_config = {}
+    local_test = os.getenv("HEYSURE_LOCAL_TEST", "").strip().lower() in {"1", "true", "yes", "on"}
+    key = "local_test_server_url" if local_test else "default_server_url"
+    fallback = LOCAL_TEST_SERVER_FALLBACK if local_test else PRODUCTION_SERVER_FALLBACK
+    value = device_config.get(key, fallback)
+    return value.strip() if isinstance(value, str) and value.strip() else fallback
 
 TOOL_DEFS = [
     {
@@ -919,7 +934,7 @@ def _default_config() -> dict:
         },
     }
     result = {
-        "server": os.getenv("HEYSURE_SERVER", "http://127.0.0.1:3000"),
+        "server": os.getenv("HEYSURE_SERVER") or _configured_server_url(),
         "account": os.getenv("HEYSURE_ACCOUNT", ""),
         "password": os.getenv("HEYSURE_PASSWORD", ""),
         "deviceId": os.getenv("HEYSURE_CLI_DEVICE_ID", _default_device_id()),
