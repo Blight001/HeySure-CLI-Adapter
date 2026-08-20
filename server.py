@@ -2,7 +2,6 @@
 
 Examples:
     python server.py
-    python server.py --platform codex --port 8120
     python server.py --platform grok --port 8100
     python server.py --platform antigravity serve --port 8110
 """

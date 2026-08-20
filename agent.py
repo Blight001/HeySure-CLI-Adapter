@@ -1,6 +1,6 @@
 """HeySure web-managed CLI adapter.
 
-This is the single deployment entrypoint for the Codex, Grok and Antigravity
+This is the single deployment entrypoint for the Grok and Antigravity
 gateways in this directory. It follows device/read.md: login, register a custom
 device with self-described MCP tools, receive task:dispatch and reply exactly
 once. The selected gateway is started only after the web console sends
@@ -38,9 +38,9 @@ CONTROL_RUNTIME_DIR = BASE_DIR / "control_runtime"
 CONFIG_PATH = CONTROL_RUNTIME_DIR / "config.json"
 WEB_INDEX_PATH = BASE_DIR / "web" / "index.html"
 VERSION = "2.0.0"
-PLATFORMS = ("codex", "grok", "antigravity")
-DEFAULT_COMMANDS = {"codex": "codex", "grok": "grok", "antigravity": "agy"}
-DEFAULT_PORTS = {"codex": 8120, "grok": 8100, "antigravity": 8110}
+PLATFORMS = ("grok", "antigravity")
+DEFAULT_COMMANDS = {"grok": "grok", "antigravity": "agy"}
+DEFAULT_PORTS = {"grok": 8100, "antigravity": 8110}
 DEVICE_CONFIG_PATH = BASE_DIR.parent / "device.config.json"
 PRODUCTION_SERVER_FALLBACK = "http://49.234.181.190:58150"
 LOCAL_TEST_SERVER_FALLBACK = "http://127.0.0.1:3000"
@@ -61,7 +61,7 @@ TOOL_DEFS = [
     {
         "name": "cli.run",
         "description": (
-            "通过统一网关让本机已登录的 Codex、Grok 或 Antigravity CLI 完成任务。"
+            "通过统一网关让本机已登录的 Grok 或 Antigravity CLI 完成任务。"
             "适合代码分析、生成、修改和 CLI 自身支持的工作；长任务请传 timeout_seconds（30-900 秒）。"
         ),
         "input_schema": {
@@ -69,7 +69,7 @@ TOOL_DEFS = [
             "properties": {
                 "prompt": {"type": "string", "description": "交给 CLI 的完整任务说明"},
                 "model": {"type": "string", "description": "可选，本次覆盖网页配置的模型"},
-                "platform": {"type": "string", "enum": ["codex", "grok", "antigravity"], "description": "可选，强制使用指定 CLI；不传则按模型自动路由"},
+                "platform": {"type": "string", "enum": ["grok", "antigravity"], "description": "可选，强制使用指定 CLI；不传则按模型自动路由"},
                 "session_id": {"type": "string", "description": "可选，复用 CLI 对话线程的稳定标识"},
                 "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 900},
             },
@@ -85,7 +85,7 @@ TOOL_DEFS = [
     },
     {
         "name": "cli.status",
-        "description": "检查统一网关及 Codex、Grok、Antigravity 各后端是否已就绪。",
+        "description": "检查统一网关及 Grok、Antigravity 各后端是否已就绪。",
         "input_schema": {"type": "object", "properties": {}},
         "destructive": False,
     },
@@ -151,17 +151,6 @@ class GatewayManager:
         server = BASE_DIR / "server.py"
         common = [sys.executable, str(server), "--platform", selected]
         host = str(config.get("listenHost") or ("0.0.0.0" if config.get("exposeEnabled") else "127.0.0.1"))
-        if selected == "codex":
-            argv = common + ["--host", host, "--port", str(port), "--timeout", timeout,
-                             "--command", command, "--sandbox", config["sandbox"]]
-            if models:
-                argv += ["--models", models]
-            sessions_dir = str(config.get("sessionsDir") or "").strip()
-            if not sessions_dir and config.get("workspace"):
-                sessions_dir = str(Path(config["workspace"]).expanduser() / ".heysure-cli" / "codex")
-            if sessions_dir:
-                argv += ["--sessions-dir", str(Path(sessions_dir).expanduser())]
-            return argv
         if selected == "grok":
             argv = common + ["--host", host, "--port", str(port), "--timeout", timeout,
                              "--command", command]
@@ -198,7 +187,7 @@ class GatewayManager:
         env["no_proxy"] = no_proxy
         gateway_key = str(config.get("gatewayApiKey") or "")
         if gateway_key:
-            env[{"codex": "CODEX_CLI_API_KEY", "grok": "GROK_CLI_API_KEY", "antigravity": "ANTIGRAVITY_API_KEY"}[config["platform"]]] = gateway_key
+            env[{"grok": "GROK_CLI_API_KEY", "antigravity": "ANTIGRAVITY_API_KEY"}[config["platform"]]] = gateway_key
         if config["platform"] == "grok":
             env["GROK_CLI_ACP"] = "1" if config.get("acpEnabled", True) else "0"
             env["GROK_CLI_TOOL_GRACE"] = str(config.get("toolGraceSeconds") or 0.5)
@@ -488,7 +477,7 @@ class UnifiedGatewayFleet:
         if explicit in PLATFORMS:
             return explicit
         if explicit:
-            raise ValueError("cli_platform 仅支持 codex、grok、antigravity")
+            raise ValueError("cli_platform 仅支持 grok、antigravity")
         needle = str(model or "").strip().lower()
         for platform in PLATFORMS:
             profile = self._config.get("profiles", {}).get(platform, {})
@@ -501,9 +490,7 @@ class UnifiedGatewayFleet:
             return "grok"
         if needle.startswith(("gemini", "antigravity")):
             return "antigravity"
-        if needle.startswith(("codex", "gpt-")):
-            return "codex"
-        default = str(self._config.get("defaultPlatform") or "codex")
+        default = str(self._config.get("defaultPlatform") or "grok")
         ready = self._enabled_platforms()
         return default if default in ready else (ready[0] if ready else default)
 
@@ -591,7 +578,7 @@ class UnifiedGatewayFleet:
             manager.stop()
 
     def _child_env(self, config: dict) -> dict:
-        platform = str(config.get("platform") or self._config.get("defaultPlatform") or "codex")
+        platform = str(config.get("platform") or self._config.get("defaultPlatform") or "grok")
         profile = dict(self._config.get("profiles", {}).get(platform) or {})
         if not profile:
             profile.update(config)
@@ -618,18 +605,14 @@ class ManagementJob:
         if action == "deps":
             return [sys.executable, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")]
         if action == "install-cli":
-            if platform == "codex":
-                return ["npm.cmd", "install", "-g", "@openai/codex"]
             installer = "https://x.ai/cli/install.ps1" if platform == "grok" else "https://antigravity.google/cli/install.ps1"
             return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"irm {installer} | iex"]
         if action == "login-status":
-            if platform == "codex":
-                return [command, "login", "status"]
             if platform == "antigravity":
                 return [command, "models"]
             return [command, "--version"]
         if action == "login":
-            return [command, "login"] if platform in {"codex", "grok"} else [command]
+            return [command, "login"] if platform == "grok" else [command]
         raise ValueError(f"不支持的管理作业: {action}")
 
     def _reader(self, process: subprocess.Popen[str]) -> None:
@@ -904,15 +887,8 @@ def _env_number(name: str, default: Any, converter: Any = int) -> Any:
 
 def _default_config() -> dict:
     profiles = {
-        "codex": {
-            "platformEnabled": True,
-            "command": os.getenv("CODEX_CLI_COMMAND", ""), "models": os.getenv("CODEX_CLI_MODELS", ""),
-            "model": "", "workspace": "", "sessionsDir": os.getenv("CODEX_CLI_SESSIONS_DIR", ""),
-            "timeoutSeconds": _env_number("CODEX_CLI_TIMEOUT", 900), "sandbox": os.getenv("CODEX_CLI_SANDBOX", "read-only"),
-            "proxyUrl": "", "noProxy": "localhost,127.0.0.1,::1",
-        },
         "grok": {
-            "platformEnabled": False,
+            "platformEnabled": True,
             "command": os.getenv("GROK_CLI_COMMAND", ""), "models": os.getenv("GROK_CLI_MODELS", "grok-4.5"),
             "model": "grok-4.5", "workspace": os.getenv("GROK_CLI_CWD", ""), "sessionsDir": "",
             "timeoutSeconds": _env_number("GROK_CLI_TIMEOUT", 600),
@@ -939,16 +915,16 @@ def _default_config() -> dict:
         "password": os.getenv("HEYSURE_PASSWORD", ""),
         "deviceId": os.getenv("HEYSURE_CLI_DEVICE_ID", _default_device_id()),
         "name": os.getenv("HEYSURE_CLI_DEVICE_NAME", "本机 CLI Adapter"),
-        "platform": "codex",
+        "platform": "grok",
         "profiles": profiles,
         "enabled": False,
         "gatewayHost": os.getenv("HEYSURE_CLI_GATEWAY_HOST", "127.0.0.1"),
         "gatewayPort": _env_number("HEYSURE_CLI_GATEWAY_PORT", 8140),
         "gatewayApiKey": os.getenv("HEYSURE_CLI_GATEWAY_API_KEY", ""),
         "gatewayPublicHost": os.getenv("HEYSURE_CLI_PUBLIC_HOST", ""),
-        "defaultPlatform": os.getenv("HEYSURE_CLI_DEFAULT_PLATFORM", "codex"),
+        "defaultPlatform": os.getenv("HEYSURE_CLI_DEFAULT_PLATFORM", "grok"),
     }
-    result.update(profiles["codex"])
+    result.update(profiles["grok"])
     return result
 
 
@@ -980,7 +956,7 @@ def _normalized_profile(platform: str, raw: dict, previous: dict) -> dict:
             return ""
         return str(raw.get(name) or previous.get(name) or "")
     result = {
-        "platformEnabled": bool(raw.get("platformEnabled", previous.get("platformEnabled", platform == "codex"))),
+        "platformEnabled": bool(raw.get("platformEnabled", previous.get("platformEnabled", platform == "grok"))),
         "command": str(raw.get("command", previous.get("command", ""))).strip(),
         "models": str(raw.get("models", previous.get("models", ""))).strip(),
         "model": str(raw.get("model", previous.get("model", ""))).strip(),
@@ -990,12 +966,7 @@ def _normalized_profile(platform: str, raw: dict, previous: dict) -> dict:
         "proxyUrl": secret("proxyUrl").strip(),
         "noProxy": str(raw.get("noProxy", previous.get("noProxy", "localhost,127.0.0.1,::1"))).strip(),
     }
-    if platform == "codex":
-        sandbox = str(raw.get("sandbox") or previous.get("sandbox") or "read-only").strip().lower()
-        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
-            raise ValueError("无效的 Codex sandbox")
-        result["sandbox"] = sandbox
-    elif platform == "grok":
+    if platform == "grok":
         result.update({
             "acpEnabled": bool(raw.get("acpEnabled", previous.get("acpEnabled", True))),
             "toolGraceSeconds": _bounded_number(raw, previous, "toolGraceSeconds", 0.5, 0.05, 10.0, float),
@@ -1022,9 +993,11 @@ def _normalized_profile(platform: str, raw: dict, previous: dict) -> dict:
 def _normalize_config(raw: dict, previous: Optional[dict] = None) -> dict:
     defaults = _default_config()
     previous = previous or defaults
-    platform = str(raw.get("platform", previous.get("platform", "codex"))).strip().lower()
+    platform = str(raw.get("platform", previous.get("platform", "grok"))).strip().lower()
+    if platform == "codex":
+        platform = "grok"
     if platform not in PLATFORMS:
-        raise ValueError("platform 仅支持 codex、grok、antigravity")
+        raise ValueError("platform 仅支持 grok、antigravity")
     password = str(raw.get("password") or "")
     if not password:
         password = str(previous.get("password") or "")
@@ -1034,9 +1007,11 @@ def _normalize_config(raw: dict, previous: Optional[dict] = None) -> dict:
     gateway_public_host = str(raw.get("gatewayPublicHost", previous.get("gatewayPublicHost", ""))).strip()
     if gateway_public_host and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]+", gateway_public_host):
         raise ValueError("公网访问地址只填写域名或 IP，不要包含协议、端口或路径")
-    default_platform = str(raw.get("defaultPlatform", previous.get("defaultPlatform", "codex"))).strip().lower()
+    default_platform = str(raw.get("defaultPlatform", previous.get("defaultPlatform", "grok"))).strip().lower()
+    if default_platform == "codex":
+        default_platform = "grok"
     if default_platform not in PLATFORMS:
-        raise ValueError("默认平台仅支持 codex、grok、antigravity")
+        raise ValueError("默认平台仅支持 grok、antigravity")
     if gateway_host not in {"127.0.0.1", "localhost", "::1"} and not gateway_api_key:
         raise ValueError("统一网关对外监听时必须设置 API Key")
     previous_profiles = previous.get("profiles") if isinstance(previous.get("profiles"), dict) else {}
@@ -1177,7 +1152,7 @@ class ControlApp:
 
     def detect_cli_config(self, platform: str, raw_profile: Optional[dict] = None) -> dict:
         if platform not in PLATFORMS:
-            raise ValueError("platform 仅支持 codex、grok、antigravity")
+            raise ValueError("platform 仅支持 grok、antigravity")
         profile = dict(self.config.get("profiles", {}).get(platform) or {})
         if isinstance(raw_profile, dict):
             for key in ("command", "model", "models", "workspace", "sessionsDir"):
@@ -1215,31 +1190,13 @@ class ControlApp:
                 model_source = "运行中的 CLI 后端"
             except RuntimeError as exc:
                 warnings.append(f"后端模型探测失败: {exc}")
-        if not models and platform == "codex" and resolved_command:
-            try:
-                completed = subprocess.run(
-                    [resolved_command, "debug", "models"], cwd=str(BASE_DIR),
-                    env=self.adapter.gateway._child_env({"platform": platform}),
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=30, check=False,
-                )
-                payload = json.loads(completed.stdout) if completed.returncode == 0 else {}
-                entries = payload.get("models") if isinstance(payload, dict) else []
-                visible = [
-                    (int(item.get("priority") or 999999), str(item.get("slug") or "").strip())
-                    for item in entries if isinstance(item, dict) and item.get("visibility") != "hide" and item.get("slug")
-                ]
-                models = [slug for _, slug in sorted(visible)]
-                model_source = "Codex CLI"
-            except (OSError, ValueError, subprocess.TimeoutExpired):
-                pass
         if not models:
             models = [item.strip() for item in str(profile.get("models") or "").split(",") if item.strip()]
             model_source = "平台推荐值" if models else "未识别"
         models = list(dict.fromkeys(models))
         defaults = _default_config()["profiles"][platform]
         current_model = str(profile.get("model") or "").strip()
-        fallback_models = {"codex": "codex-default", "grok": "grok-4.5", "antigravity": "gemini-3.5-flash-medium"}
+        fallback_models = {"grok": "grok-4.5", "antigravity": "gemini-3.5-flash-medium"}
         default_model = current_model if current_model in models else (models[0] if models else str(defaults.get("model") or fallback_models[platform]))
         workspace = str(profile.get("workspace") or "").strip()
         if not workspace or not Path(workspace).expanduser().is_dir():
@@ -1275,7 +1232,7 @@ class ControlApp:
             # credential/server errors instead of silently waiting on that thread.
             return self.adapter.verify_login()
         if action == "detect-cli-config":
-            platform = str(payload.get("platform") or self.config.get("platform") or "codex").strip().lower()
+            platform = str(payload.get("platform") or self.config.get("platform") or "grok").strip().lower()
             return self.detect_cli_config(platform, payload.get("profile"))
         if action in {"deps", "install-cli", "login", "login-status"}:
             return self.job.start(

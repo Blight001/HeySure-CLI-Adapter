@@ -1,11 +1,11 @@
 # HeySure CLI Adapter
 
-`agent.py` 是 Codex、Grok、Antigravity 三套本地 CLI 网关的统一入口。部署时只运行
+`agent.py` 是 Grok、Antigravity 两套本地 CLI 网关的统一入口。部署时只运行
 一个 Adapter；它自带本地管理网页，具体平台、HeySure 登录、CLI 路径、模型、工作
-目录、超时和 Codex 沙箱均在网页中设置，保存后实时生效。
+目录和超时均在网页中设置，保存后实时生效。
 
 代码实现也已统一到 `cli_gateway/`：`agent.py` 管理统一对外 API，`server.py --platform ...`
-只负责启动本机私有后端，三个 `*_cli_api/server.py` 仅保留为旧命令兼容壳。公共的配置、JSON、会话指纹和内容
+只负责启动本机私有后端，两个 `*_cli_api/server.py` 仅保留为旧命令兼容壳。公共的配置、JSON、会话指纹和内容
 处理位于 `cli_gateway/shared.py`，平台差异集中在 `cli_gateway/backends/`。
 
 ## 启动
@@ -40,7 +40,7 @@ Linux 也支持非交互子命令：
 root 用户安装系统级 systemd 服务，普通用户安装 user service。OpenCloudOS、CentOS、
 RHEL、Debian、Ubuntu 和 Alpine 的常见包管理器均可自动处理 Python/pip 依赖。
 HeySure 配置存放在本机 `control_runtime/config.json`（已忽略提交，权限尽量收紧为
-仅当前用户可读）；Codex/Grok/Antigravity 的登录资料仍由各 CLI 保存在本机，不上传
+仅当前用户可读）；Grok/Antigravity 的登录资料仍由各 CLI 保存在本机，不上传
 HeySure 服务器。
 
 ## 管理页能力
@@ -58,17 +58,16 @@ API Key。可一键生成高强度随机 Key并复制。服务器模式监听 `0
 当前管理页的访问域名/IP 生成 Base URL；监听所有网卡不等于自动获得公网 IP，云安全组、
 系统防火墙以及可能存在的 NAT 端口映射仍需在服务器环境中配置。
 
-三个平台各自保存独立配置，切换平台不会覆盖其它平台：
+两个平台各自保存独立配置，切换平台不会覆盖其它平台：
 
 - 通用：CLI 路径、默认模型、模型目录、工作目录、会话目录、调用超时、代理；
-- Codex：`read-only` / `workspace-write` / `danger-full-access` 沙箱；
 - Grok：ACP 开关、工具收集窗口、会话 TTL/上限、可选 xAI API Key；
 - Antigravity：官方 `agy` 或旧 `direct` 后端、参数安全字节数、OAuth 与 API 地址；
 - 运维：探测 CLI 版本、重启内部网关、读取启动日志、刷新模型目录；
 - 测试：选择模型并从网页直接发起一次真实聊天调用。
 
 “平台基础设置”支持一键自动识别。它会定位已安装的 CLI 可执行文件并读取版本；优先从
-正在运行的后端获取真实模型目录，Codex 未启动时也会尝试调用 `codex debug models`；
+正在运行的后端获取真实模型目录；
 无法由 CLI 报告的内容使用平台推荐值。工作目录和各平台独立会话目录也会生成建议值，
 所有结果先在弹窗中预览，只有点击“应用识别结果”并保存后才生效。
 
@@ -82,14 +81,14 @@ API”栏目，由主网关一次性控制所有已勾选启用的 CLI 子平台
 
 对外只提供一个 OpenAI 兼容地址，默认是 `http://127.0.0.1:8140/v1`。模型目录由所有已启用
 平台合并，聊天请求先按已配置模型名匹配，再按 `grok-*`、`gemini-*`、`gpt-*` 等前缀
-路由；调用方也可传 `cli_platform`（`codex` / `grok` / `antigravity`）强制选择。统一 API
+路由；调用方也可传 `cli_platform`（`grok` / `antigravity`）强制选择。统一 API
 支持普通 JSON 和 SSE 流式响应。“对外开放”会把统一地址切换为 `0.0.0.0`，此时强制要求
 网关 API Key。各平台子网关始终使用随机回环端口，避免端口冲突。开机自启
 管理的是统一 Adapter（Windows 计划任务 / Linux systemd user service），不会额外启动
 一套旧网关。
 
 密码、API Key、OAuth Secret 和可能含认证信息的代理 URL 不会回显到浏览器；留空保存
-表示保留原值。内部三个 OpenAI 网关只绑定随机的本机回环端口，不对局域网暴露。
+表示保留原值。内部两个 OpenAI 网关只绑定随机的本机回环端口，不对局域网暴露。
 
 Adapter 首次上线后：
 
@@ -101,4 +100,4 @@ Adapter 首次上线后：
 接入与回包完全遵循 [`../read.md`](../read.md) 的 `device:register`、`task:dispatch`
 和 `task:result/task:error` 契约。
 
-原来的三个 `*_cli_api/server.py` 只保留旧命令兼容能力，新部署无需也不应分别对外启动它们。
+原来的两个 `*_cli_api/server.py` 只保留旧命令兼容能力，新部署无需也不应分别对外启动它们。

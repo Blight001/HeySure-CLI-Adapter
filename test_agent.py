@@ -33,15 +33,13 @@ class ConfigTests(unittest.TestCase):
 
     def test_each_platform_has_independent_management_config(self):
         config = agent._default_config()
-        self.assertEqual(set(config["profiles"]), {"codex", "grok", "antigravity"})
+        self.assertEqual(set(config["profiles"]), {"grok", "antigravity"})
         self.assertEqual(config["gatewayPort"], 8140)
         for platform in agent.PLATFORMS:
             profile = config["profiles"][platform]
             self.assertIn("platformEnabled", profile)
             self.assertIn("timeoutSeconds", profile)
             self.assertIn("proxyUrl", profile)
-        self.assertIn("sandbox", config["profiles"]["codex"])
-        self.assertNotIn("backend", config["profiles"]["codex"])
         self.assertIn("xaiApiKey", config["profiles"]["grok"])
         self.assertNotIn("sandbox", config["profiles"]["grok"])
         self.assertIn("backend", config["profiles"]["antigravity"])
@@ -49,11 +47,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_hidden_platform_fields_are_not_validated_or_saved(self):
         defaults = agent._default_config()
-        codex = agent._normalized_profile("codex", {"backend": ""}, defaults["profiles"]["codex"])
+        grok = agent._normalized_profile("grok", {"backend": ""}, defaults["profiles"]["grok"])
         antigravity = agent._normalized_profile(
             "antigravity", {"backend": ""}, defaults["profiles"]["antigravity"]
         )
-        self.assertNotIn("backend", codex)
+        self.assertNotIn("backend", grok)
         self.assertEqual(antigravity["backend"], "cli")
 
     def test_unified_external_listener_requires_api_key(self):
@@ -88,7 +86,7 @@ class ConfigTests(unittest.TestCase):
         }
         configured = agent._normalize_config(raw, defaults)
         self.assertEqual(configured["gatewayPort"], 8140)
-        self.assertEqual(configured["profiles"]["codex"]["timeoutSeconds"], 900)
+        self.assertEqual(configured["profiles"]["grok"]["timeoutSeconds"], 600)
         self.assertEqual(configured["profiles"]["grok"]["toolGraceSeconds"], 0.5)
         self.assertEqual(configured["profiles"]["antigravity"]["callbackPort"], 51121)
 
@@ -103,16 +101,26 @@ class ConfigTests(unittest.TestCase):
     def test_partial_config_updates_preserve_other_sections(self):
         previous = agent._default_config()
         previous.update({"server": "http://old:3000", "account": "old-user", "gatewayPort": 8140})
-        previous["profiles"]["codex"]["workspace"] = "/saved/codex"
+        previous["profiles"]["antigravity"]["workspace"] = "/saved/antigravity"
         gateway_only = agent._normalize_config({"gatewayPort": 9000}, previous)
         self.assertEqual(gateway_only["server"], "http://old:3000")
-        self.assertEqual(gateway_only["profiles"]["codex"]["workspace"], "/saved/codex")
+        self.assertEqual(gateway_only["profiles"]["antigravity"]["workspace"], "/saved/antigravity")
         cli_only = agent._normalize_config(
             {"platform": "grok", "profiles": {"grok": {"timeoutSeconds": 321}}}, gateway_only
         )
         self.assertEqual(cli_only["gatewayPort"], 9000)
         self.assertEqual(cli_only["profiles"]["grok"]["timeoutSeconds"], 321)
-        self.assertEqual(cli_only["profiles"]["codex"]["workspace"], "/saved/codex")
+        self.assertEqual(cli_only["profiles"]["antigravity"]["workspace"], "/saved/antigravity")
+
+    def test_retired_codex_defaults_migrate_to_grok(self):
+        previous = agent._default_config()
+        previous["platform"] = "codex"
+        previous["defaultPlatform"] = "codex"
+
+        configured = agent._normalize_config({}, previous)
+
+        self.assertEqual(configured["platform"], "grok")
+        self.assertEqual(configured["defaultPlatform"], "grok")
 
     def test_all_platforms_offer_management_jobs(self):
         config = agent._default_config()
@@ -122,14 +130,14 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(jobs._command(platform, action, config["profiles"][platform]))
 
     def test_private_gateway_uses_loopback_without_api_key(self):
-        profile = agent._default_config()["profiles"]["codex"]
+        profile = agent._default_config()["profiles"]["grok"]
         fleet = agent.UnifiedGatewayFleet()
-        active = fleet._private_config("codex", {"enabled": True, "profiles": {"codex": profile}})
-        argv = agent.GatewayManager()._argv(active, 8120)
+        active = fleet._private_config("grok", {"enabled": True, "profiles": {"grok": profile}})
+        argv = agent.GatewayManager()._argv(active, 8100)
         self.assertIn("127.0.0.1", argv)
-        self.assertIn("8120", argv)
+        self.assertIn("8100", argv)
         env = agent.GatewayManager()._child_env(active)
-        self.assertNotIn("CODEX_CLI_API_KEY", env)
+        self.assertNotIn("GROK_CLI_API_KEY", env)
 
     def test_gateway_manager_uses_unified_entrypoint(self):
         profile = agent._default_config()["profiles"]["grok"]
@@ -160,14 +168,13 @@ class UnifiedRoutingTests(unittest.TestCase):
         self.fleet = agent.UnifiedGatewayFleet()
         self.fleet.managers = {name: _FakeManager(name) for name in agent.PLATFORMS}
         self.fleet._config = agent._default_config()
-        self.fleet._config["profiles"]["codex"]["models"] = "gpt-5,codex-special"
-        self.fleet._config["profiles"]["grok"]["models"] = "grok-4.5"
+        self.fleet._config["profiles"]["grok"]["models"] = "grok-4.5,gpt-5"
         self.fleet._config["profiles"]["antigravity"]["models"] = "gemini-3.5-flash"
 
     def test_routes_by_configured_model_and_prefix(self):
         self.assertEqual(self.fleet.complete({"model": "grok-4.5"})["cli_platform"], "grok")
         self.assertEqual(self.fleet.complete({"model": "gemini-new"})["cli_platform"], "antigravity")
-        self.assertEqual(self.fleet.complete({"model": "gpt-5"})["cli_platform"], "codex")
+        self.assertEqual(self.fleet.complete({"model": "gpt-5"})["cli_platform"], "grok")
 
     def test_explicit_platform_override_is_removed_before_forwarding(self):
         result = self.fleet.complete({"model": "gpt-5", "cli_platform": "grok"})
@@ -179,7 +186,7 @@ class UnifiedRoutingTests(unittest.TestCase):
 
     def test_models_are_aggregated_and_tagged(self):
         result = self.fleet.models()
-        self.assertEqual(len(result["data"]), 3)
+        self.assertEqual(len(result["data"]), 2)
         self.assertEqual({item["cli_platform"] for item in result["data"]}, set(agent.PLATFORMS))
 
     def test_unified_http_api_uses_one_key_and_aggregates_models(self):
@@ -193,7 +200,7 @@ class UnifiedRoutingTests(unittest.TestCase):
                 f"http://127.0.0.1:{port}/v1/models",
                 headers={"Authorization": "Bearer secret"},
             )
-            self.assertEqual(len(result["data"]), 3)
+            self.assertEqual(len(result["data"]), 2)
             completion = agent._json_request(
                 f"http://127.0.0.1:{port}/v1/chat/completions",
                 {"model": "grok-4.5", "messages": [{"role": "user", "content": "hi"}]},
@@ -235,23 +242,17 @@ class ControlActionTests(unittest.TestCase):
         app.adapter = SimpleNamespace(gateway=Fleet())
 
         def completed(argv, **kwargs):
-            if argv[-2:] == ["debug", "models"]:
-                return agent.subprocess.CompletedProcess(
-                    argv, 0,
-                    stdout='{"models":[{"slug":"gpt-auto","priority":1,"visibility":"list"}]}',
-                    stderr="",
-                )
-            return agent.subprocess.CompletedProcess(argv, 0, stdout="codex 1.2.3", stderr="")
+            return agent.subprocess.CompletedProcess(argv, 0, stdout="grok 1.2.3", stderr="")
 
-        with patch.object(agent.shutil, "which", return_value="C:/tools/codex.exe"), patch.object(
+        with patch.object(agent.shutil, "which", return_value="C:/tools/grok.exe"), patch.object(
             agent.subprocess, "run", side_effect=completed
         ):
-            result = app.detect_cli_config("codex")
-        self.assertEqual(result["values"]["command"], "C:/tools/codex.exe")
-        self.assertEqual(result["values"]["model"], "gpt-auto")
-        self.assertEqual(result["values"]["models"], "gpt-auto")
-        self.assertEqual(result["values"]["timeoutSeconds"], 900)
-        self.assertTrue(result["values"]["sessionsDir"].endswith("sessions\\codex") or result["values"]["sessionsDir"].endswith("sessions/codex"))
+            result = app.detect_cli_config("grok")
+        self.assertEqual(result["values"]["command"], "C:/tools/grok.exe")
+        self.assertEqual(result["values"]["model"], "grok-4.5")
+        self.assertEqual(result["values"]["models"], "grok-4.5")
+        self.assertEqual(result["values"]["timeoutSeconds"], 600)
+        self.assertTrue(result["values"]["sessionsDir"].endswith("sessions\\grok") or result["values"]["sessionsDir"].endswith("sessions/grok"))
 
     def test_service_start_stop_are_global_and_preserve_child_selection(self):
         class Gateway:
@@ -270,16 +271,16 @@ class ControlActionTests(unittest.TestCase):
 
         app = agent.ControlApp.__new__(agent.ControlApp)
         app.config = agent._default_config()
-        app.config["profiles"]["codex"]["platformEnabled"] = True
-        app.config["profiles"]["grok"]["platformEnabled"] = False
+        app.config["profiles"]["grok"]["platformEnabled"] = True
+        app.config["profiles"]["antigravity"]["platformEnabled"] = False
         app.adapter = Adapter()
         with patch.object(agent, "_save_config"):
             app.action("start", {})
             self.assertTrue(app.config["enabled"])
             app.action("stop", {})
             self.assertFalse(app.config["enabled"])
-        self.assertTrue(app.config["profiles"]["codex"]["platformEnabled"])
-        self.assertFalse(app.config["profiles"]["grok"]["platformEnabled"])
+        self.assertTrue(app.config["profiles"]["grok"]["platformEnabled"])
+        self.assertFalse(app.config["profiles"]["antigravity"]["platformEnabled"])
         self.assertEqual(app.adapter.gateway.applied, [True, False])
 
 
